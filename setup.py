@@ -1,29 +1,32 @@
-import shutil
-from pathlib import Path
+from setuptools import find_packages, setup
 
-import setuptools
-
-stale_egg_info = Path(__file__).parent / "bertology_sklearn.egg-info"
-if stale_egg_info.exists():
-    shutil.rmtree(stale_egg_info)
-
-with open("README.md", "r") as fh:
-    long_description = fh.read()
-
-setuptools.setup(
-    name="bertology_sklearn",
-    version="0.0.1",
-    author="trueto",
-    author_email="ab1509359472@163.com",
-    description="a package for users working with bertology models in scikit-learn style",
-    long_description= long_description,
+setup(
+    name = 'bertology_sklearn',
+    version = "1.0.0",
+    author = 'trueto',
+    author_email='ab1509359472@163.com',
+    description="A sklearn wrapper for Transformers",
+    long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/trueto/bertology_sklearn",
-    license="Apache",
-    package_dir={"": "src"},
-    packages=setuptools.find_packages("src"),
+    keywords='scikit_sklearn Transformers NLP Deep Learning',
+    license='Apache',
+    url='https://github.com/trueto/bertology_sklearn',
+    packages=find_packages(exclude="tutorial"),
+    install_requires=['torch>=1.0.0',
+                      'transformers>=2.2.0',
+                      'scikit-learn',
+                      'numpy',
+                      'pandas',
+                      'boto3',
+                      'requests',
+                      'tqdm',
+                      'ignite'
+                      ],
+    python_requires='>=3.5.0',
     classifiers=[
-        "Deep Learning::BERT"
+          'Intended Audience :: Science/Research',
+          'License :: OSI Approved :: Apache Software License',
+          'Programming Language :: Python :: 3',
+          'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
-    python_requires='>=3.6'
 )

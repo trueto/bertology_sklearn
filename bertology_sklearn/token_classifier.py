@@ -18,10 +18,9 @@ import numpy as np
 import torch.nn as nn
 from glob import glob
 from tqdm import tqdm
-from scipy.stats import pearsonr, spearmanr
 
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score
 
 from ignite.engine import Engine, Events
 from ignite.metrics import RunningAverage
@@ -32,12 +31,12 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, AdamW, get_cosine_with_hard_restarts_schedule_with_warmup
 from torch.utils.data import random_split, DataLoader, SequentialSampler, RandomSampler
 
-from .models import BertologyForClassification
-from .data_utils import text_load_and_cache_examples, TextDataProcessor
+from bertology_sklearn.models import BertologyForTokenClassification
+from bertology_sklearn.data_utils import TokenDataProcessor, token_load_and_cache_examples
 
 logger = logging.getLogger(__name__)
 
-class BertologyClassifier(BaseEstimator, ClassifierMixin):
+class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
     def __init__(self, model_name_or_path="bert-base-chinese",
                  do_lower_case=True, cache_dir="cache_model", data_dir="cache_data",
@@ -47,11 +46,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  classifier_dropout=0.5, classifier_type="Linear", kernel_num=3,
                  kernel_sizes=(3,4,5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
-                 warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
-                 task_type="classify"):
+                 warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3):
 
         super().__init__()
-        self.task_type = task_type
         self.n_saved = n_saved
         self.patience = patience
         self.fp16_opt_level = fp16_opt_level
@@ -119,9 +116,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                                                   do_lower_case=self.do_lower_case,
                                                   cache_dir=self.cache_dir)
 
-        processor = TextDataProcessor(X, y)
+        processor = TokenDataProcessor(X, y)
 
-        dataset = text_load_and_cache_examples(self, tokenizer, processor)
+        dataset = token_load_and_cache_examples(self, tokenizer, processor)
 
         ds_len = len(dataset)
         dev_len = int(len(dataset) * self.dev_fraction)
@@ -137,10 +134,10 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.label_list = processor.get_labels()
         self.num_labels = len(self.label_list)
 
-        model = BertologyForClassification(model_name_or_path=self.model_name_or_path,
-                                           num_labels=self.num_labels,cache_dir=self.cache_dir,
-                                           dropout=self.classifier_dropout,kernel_num=self.kernel_num,
-                                           kernel_sizes=self.kernel_sizes,num_layers=self.num_layers)
+        model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
+                                                num_labels=self.num_labels, cache_dir=self.cache_dir,
+                                                device=self.device,classifier_type=self.classifier_type,
+                                                num_layers=self.num_layers)
 
         model.to(self.device)
 
@@ -178,23 +175,15 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
             inputs = {
                 "input_ids": batch[0],
                 "attention_mask": batch[1],
-                "token_type_ids": batch[2]
+                "token_type_ids": batch[2],
+                "labels": labels
             }
-            logits = model(**inputs)
-
-            if self.num_labels == 1:
-                loss_fn = nn.MSELoss()
-                loss = loss_fn(logits.view(-1), labels.view(-1))
-                preds = logits.view(-1)
-                score = (spearmanr(preds, labels)[0] + pearsonr(preds, labels)) / 2
+            if self.classifier_type == "Linear":
+                loss, sequence_tags = model(**inputs)
             else:
-                loss_fct = nn.CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-                preds = logits.argmax(dim=-1)
-                if self.num_labels == 2:
-                    score = f1_score(labels, preds)
-                else:
-                    score = f1_score(labels, preds, average="macro")
+                loss, sequence_tags = model.module.forward(**inputs)
+
+            score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
 
             if self.n_gpu > 1:
                 loss = loss.mean()
@@ -223,27 +212,18 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
-                    "token_type_ids": batch[2]
+                    "token_type_ids": batch[2],
+                    "labels": batch[3]
                 }
-                logits = model(**inputs)
-
-                if self.num_labels == 1:
-                    loss_fn = nn.MSELoss()
-                    loss = loss_fn(logits.view(-1), labels.view(-1))
-                    preds = logits.view(-1)
-                    score = (spearmanr(preds, labels)[0] + pearsonr(preds, labels)) / 2
+                if self.classifier_type == "Linear":
+                    loss, sequence_tags = model(**inputs)
                 else:
-                    loss_fct = nn.CrossEntropyLoss()
-                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-                    preds = logits.argmax(dim=-1)
-                    if self.num_labels == 2:
-                        score = f1_score(labels, preds)
-                    else:
-                        score = f1_score(labels, preds, average="macro")
+                    loss, sequence_tags = model.module.forward(**inputs)
+
+                score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
 
                 if self.n_gpu > 1:
                     loss = loss.mean()
-
             ## tensorboard
             tb_writer.add_scalar('dev_loss', loss.item(), global_step_from_engine(trainer))
             tb_writer.add_scalar('dev_score', score.item(), global_step_from_engine(trainer))
@@ -314,38 +294,41 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         args = torch.load(os.path.join(self.output_dir, 'fit_args.pt'))
 
         ## data
-        processor = TextDataProcessor(X)
+        processor = TokenDataProcessor(X)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
                                                   do_lower_case=self.do_lower_case,
                                                   cache_dir=self.cache_dir)
-        dataset = text_load_and_cache_examples(self, tokenizer, processor, evaluate=True)
+        dataset = token_load_and_cache_examples(self, tokenizer, processor, evaluate=True)
 
         sampler = SequentialSampler(dataset)
         batch_size = self.per_val_batch_size * max(1, self.n_gpu)
         dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
         ## model
-        model = BertologyForClassification(model_name_or_path=self.model_name_or_path,
-                                           num_labels=args.num_labels, cache_dir=self.cache_dir,
-                                           dropout=self.classifier_dropout, classifier_type=self.classifier_type,
-                                           kernel_num=self.kernel_num, kernel_sizes=self.kernel_sizes,
-                                           num_layers=self.num_layers)
+        model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
+                                                num_labels=self.num_labels, cache_dir=self.cache_dir,
+                                                device=self.device, classifier_type=self.classifier_type,
+                                                num_layers=self.num_layers)
 
         y_preds = []
         for model_state_path in glob(os.path.join(self.output_dir, '*.pth')):
             model.load_state_dict(torch.load(model_state_path))
-            y_pred = self.single_predict(model, dataloader)
+            y_pred,  out_label_ids = self.single_predict(model, dataloader)
             y_preds.append(y_pred)
 
-        if self.task_type == "classify":
-            y_preds = torch.tensor(y_preds)
-            y_pred = torch.mode(y_preds, dim=0).values
-            y_pred = y_pred.numpy()
-            y_pred = [args.label_list[i] for i in y_pred]
-        else:
-            y_pred = np.mean(y_preds, axis=0)
+        y_preds = torch.tensor(y_preds)
+        y_pred = torch.mode(y_preds, dim=0).values
+        y_pred = y_pred.numpy()
 
-        return y_pred
+        preds_list = [[] for _ in range(out_label_ids.shape[0])]
+
+        pad_token_label_id = nn.CrossEntropyLoss().ignore_index
+
+        for i in range(out_label_ids.shape[0]):
+            for j in range(out_label_ids.shape[1]):
+                if out_label_ids[i, j] != pad_token_label_id:
+                    preds_list[i].append(args.label_list[y_pred[i][j]])
+        return preds_list
 
     def single_predict(self, model, data_iter):
         model.to(self.device)
@@ -359,34 +342,35 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         logger.info("  Num examples = %d", len(data_iter)*self.per_val_batch_size*self.n_gpu)
 
         preds = None
+        out_label_ids = None
         for batch in tqdm(data_iter, desc="Predicting"):
             model.eval()
             batch = tuple(t.to(self.device) for t in batch)
-
+            labels = batch[3]
             with torch.no_grad():
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
                     "token_type_ids": batch[2]
                 }
-                logits = model(**inputs)
-            pred = logits.detach().cpu().numpy()
+                if self.classifier_type == "Linear":
+                    _, sequence_tags = model(**inputs)
+                    sequence_tags = sequence_tags.detach.cpu().numpy()
+                else:
+                    _, sequence_tags = model.module.forward(**inputs)
+                    sequence_tags = np.array(sequence_tags)
+
+            labels = labels.detach.cpu().numpy()
             if preds is None:
-                preds = pred
+                preds = sequence_tags
+                out_label_ids = labels
             else:
-                preds = np.append(preds, pred, axis=0)
+                preds = np.append(preds, sequence_tags, axis=0)
+                out_label_ids = np.append(out_label_ids, labels, axis=0)
 
-        if self.task_type == "classify":
-            preds = np.argmax(preds, axis=1)
-        else:
-            preds = np.squeeze(preds)
-
-        return preds
+        return preds, out_label_ids
 
     def score(self, X, y, sample_weight=None):
         y_pred = self.predict(X)
-        if self.task_type == "classify":
-            score = f1_score(y, y_pred, average="macro")
-        else:
-            score = (pearsonr(y_pred, y)[0] + spearmanr(y_pred, y)[0]) / 2
+        score = f1_score(y, y_pred, average="macro")
         return score
