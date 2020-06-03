@@ -1,0 +1,2 @@
+from .text_classifier import BertologyClassifier
+from .token_classifier import BertologyTokenClassifier
