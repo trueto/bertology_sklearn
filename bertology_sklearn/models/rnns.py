@@ -62,6 +62,7 @@ class TextRNN(nn.Module):
 
 class LSTM(nn.Module):
     def __init__(self, input_size, num_layers):
+        super().__init__()
         self.lstm = nn.LSTM(input_size, input_size // 2, num_layers=num_layers,
                 dropout=0.5, batch_first=True, bidirectional=True)
 

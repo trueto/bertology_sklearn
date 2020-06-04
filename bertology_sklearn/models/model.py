@@ -107,6 +107,7 @@ class BertologyForTokenClassification(nn.Module):
             self.crf = CRF(num_labels, device=device)
 
         self.classifier_type = classifier_type
+        self.num_labels = num_labels
         self.device = device
 
     def forward(self,

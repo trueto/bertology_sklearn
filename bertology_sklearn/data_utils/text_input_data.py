@@ -89,7 +89,9 @@ class DataProcessor:
             self.labels = [None] * len(self.texts_a)
 
     def get_labels(self):
-        return np.unique(self.labels)
+        label_list = list(np.unique(self.labels))
+        logger.info("label_list:{}".format(label_list))
+        return label_list
 
     def get_examples(self):
         examples = []
@@ -117,7 +119,7 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
         if not evaluate and args.task_type == "classify":
             label_list = processor.get_labels()
         else:
-            label_list = None
+            label_list = args.label_list
 
         dataset = convert_examples_to_features(
             examples=examples,
@@ -126,24 +128,40 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
             is_training=not evaluate,
             label_list=label_list
         )
+        if not evaluate:
+            torch.save(dataset, cached_features_file)
 
     return dataset
 
 def convert_examples_to_features(examples, tokenizer, max_seq_length, is_training, label_list):
+    label_map = {label: i for i, label in enumerate(label_list)}
     with Pool(cpu_count(),initializer=pool_init_fn, initargs=(tokenizer,)) as p:
         part_fn = partial(
             convert_example_to_features,
             max_length=max_seq_length,
-            label_list=label_list
+            label_map=label_map
         )
 
         features = list(
             tqdm(
-                p.imap(part_fn, examples),
+                p.imap(part_fn, examples, chunksize=32),
                 total=len(examples),
                 desc="convert examples to features",
             )
         )
+
+        for data_index, f in enumerate(features):
+            if data_index < 3:
+                logger.info("*** Example ***")
+                logger.info("{}th example".format(data_index+1))
+                logger.info("input_ids: %s" % " ".join([str(x) for x in f.input_ids]))
+                logger.info("attention_mask: %s" % " ".join([str(x) for x in f.attention_mask]))
+                logger.info("token_type_ids: %s" % " ".join([str(x) for x in f.token_type_ids]))
+                logger.info("input_text: %s" % " ".join(tokenizer.convert_ids_to_tokens(f.input_ids)))
+
+                if is_training:
+                    label = examples[data_index].label
+                    logger.info("label: %s (id = %d)" % (label, label_map[label]))
 
         # Convert to Tensors and build dataset
         all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
@@ -159,10 +177,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, is_trainin
                 all_labels = torch.tensor([f.label for f in features], dtype=torch.float)
 
             dataset = TensorDataset(all_input_ids, all_attention_masks, all_token_type_ids, all_labels)
+
         return dataset
 
 def convert_example_to_features(example, max_length,
-                                  label_list=None,
+                                  label_map=None,
                                   pad_on_left=False,
                                   pad_token=0,
                                   pad_token_segment_id=0,
@@ -195,20 +214,10 @@ def convert_example_to_features(example, max_length,
                                                                                             max_length)
         assert len(token_type_ids) == max_length, "Error with input length {} vs {}".format(len(token_type_ids),max_length)
 
-        if label_list is not None:
-            label = label_list.index(example.label)
+        if label_map is not None:
+            label = label_map[example.label]
         else:
             label = example.label
-
-        data_index += 1
-        if data_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
-            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            logger.info("attention_mask: %s" % " ".join([str(x) for x in attention_mask]))
-            logger.info("token_type_ids: %s" % " ".join([str(x) for x in token_type_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label))
-            logger.info("input_text: %s" % " ".join(tokenizer.convert_ids_to_tokens(input_ids)))
 
         return InputFeatures(input_ids=input_ids,attention_mask=attention_mask,
                              token_type_ids=token_type_ids, label=label)

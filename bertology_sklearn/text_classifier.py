@@ -22,6 +22,7 @@ from scipy.stats import pearsonr, spearmanr
 
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics import f1_score
+from sklearn.model_selection import KFold
 
 from ignite.engine import Engine, Events
 from ignite.metrics import RunningAverage
@@ -29,10 +30,12 @@ from ignite.handlers import ModelCheckpoint, EarlyStopping, global_step_from_eng
 from ignite.contrib.handlers import ProgressBar
 
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, AdamW, get_cosine_with_hard_restarts_schedule_with_warmup
+from transformers import AutoTokenizer, AdamW, \
+    get_cosine_with_hard_restarts_schedule_with_warmup, BertTokenizer
 from torch.utils.data import random_split, DataLoader, SequentialSampler, RandomSampler
 
 from bertology_sklearn.models import BertologyForClassification
+from bertology_sklearn.data_utils.common import to_numpy
 from bertology_sklearn.data_utils import text_load_and_cache_examples, TextDataProcessor
 
 logger = logging.getLogger(__name__)
@@ -48,7 +51,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3,4,5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
-                 task_type="classify"):
+                 task_type="classify", do_cv=False):
 
         super().__init__()
         self.task_type = task_type
@@ -78,6 +81,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.model_name_or_path = model_name_or_path
         self.do_lower_case = do_lower_case
         self.cache_dir = cache_dir
+
+        self.do_cv = do_cv
 
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
@@ -115,17 +120,49 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     self.output_dir))
 
         ## data
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
-                                                  do_lower_case=self.do_lower_case,
-                                                  cache_dir=self.cache_dir)
+        if 'chinese' in self.model_name_or_path:
+            tokenizer = BertTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
 
-        processor = TextDataProcessor(X, y)
+        if self.do_cv:
+            kfold = KFold(n_splits=5, shuffle=True, random_state=self.seed)
+            cv = 0
+            X, y = to_numpy(X), to_numpy(y)
+            for train_index, dev_index in kfold.split(X, y):
+                cv += 1
+                ## data
+                X_train, X_dev = X[train_index], X[dev_index]
+                y_train, y_dev = y[train_index], y[dev_index]
 
-        dataset = text_load_and_cache_examples(self, tokenizer, processor)
+                self.overwrite_cache = True
 
-        ds_len = len(dataset)
-        dev_len = int(len(dataset) * self.dev_fraction)
-        train_ds, dev_ds = random_split(dataset, [ds_len - dev_len, dev_len])
+                train_processor = TextDataProcessor(X_train, y_train)
+                dev_processor = TextDataProcessor(X_dev, y_dev)
+
+                self.label_list = train_processor.get_labels()
+                self.num_labels = len(self.label_list)
+                train_ds = text_load_and_cache_examples(self, tokenizer, train_processor)
+                dev_ds = text_load_and_cache_examples(self, tokenizer, dev_processor)
+
+                self.single_fit(train_ds, dev_ds, cv=cv)
+        else:
+            processor = TextDataProcessor(X, y)
+
+            dataset = text_load_and_cache_examples(self, tokenizer, processor)
+            self.label_list = processor.get_labels()
+            self.num_labels = len(self.label_list)
+            ds_len = len(dataset)
+            dev_len = int(len(dataset) * self.dev_fraction)
+            train_ds, dev_ds = random_split(dataset, [ds_len - dev_len, dev_len])
+            self.single_fit(train_ds, dev_ds)
+
+    def single_fit(self, train_ds, dev_ds, cv=None):
+        ## data
         batch_size = self.n_gpu * self.per_train_batch_size
         train_sampler = RandomSampler(train_ds)
         train_iter = DataLoader(train_ds, sampler=train_sampler, batch_size=batch_size)
@@ -134,9 +171,6 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         dev_iter = DataLoader(dev_ds, sampler=dev_sampler, batch_size=batch_size)
 
         ## model
-        self.label_list = processor.get_labels()
-        self.num_labels = len(self.label_list)
-
         model = BertologyForClassification(model_name_or_path=self.model_name_or_path,
                                            num_labels=self.num_labels,cache_dir=self.cache_dir,
                                            dropout=self.classifier_dropout,kernel_num=self.kernel_num,
@@ -200,9 +234,10 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 loss = loss.mean()
 
             ## tensorboard
-            tb_writer.add_scalar('learning_rate', scheduler.get_lr()[0], global_step_from_engine(engine))
-            tb_writer.add_scalar('train_loss', loss.item(), global_step_from_engine(engine))
-            tb_writer.add_scalar('train_score', score.item(), global_step_from_engine(engine))
+            global_step = global_step_from_engine(trainer)(engine, engine.last_event_name)
+            tb_writer.add_scalar('learning_rate', scheduler.get_lr()[0], global_step)
+            tb_writer.add_scalar('train_loss', loss.item(), global_step)
+            tb_writer.add_scalar('train_score', score.item(), global_step)
 
             loss.backward()
             optimizer.step()
@@ -245,8 +280,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     loss = loss.mean()
 
             ## tensorboard
-            tb_writer.add_scalar('dev_loss', loss.item(), global_step_from_engine(trainer))
-            tb_writer.add_scalar('dev_score', score.item(), global_step_from_engine(trainer))
+            global_step = global_step_from_engine(trainer)(engine, engine.last_event_name)
+            tb_writer.add_scalar('dev_loss', loss.item(), global_step)
+            tb_writer.add_scalar('dev_score', score.item(), global_step)
 
             return loss.item(), score.item()
 
@@ -286,7 +322,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
             score = engine.state.metrics['score']
             return score
 
-        checkpointer = ModelCheckpoint(self.output_dir, "best", n_saved=self.n_saved,
+        model_prefix = "best" if cv is None else "cv_{}_best".format(cv)
+
+        checkpointer = ModelCheckpoint(self.output_dir, model_prefix, n_saved=self.n_saved,
                                        create_dir=True,score_name="model_score",
                                        score_function=model_score,
                                        global_step_transform=global_step_from_engine(trainer))

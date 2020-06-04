@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics import f1_score
+from sklearn.model_selection import KFold
 
 from ignite.engine import Engine, Events
 from ignite.metrics import RunningAverage
@@ -28,11 +29,14 @@ from ignite.handlers import ModelCheckpoint, EarlyStopping, global_step_from_eng
 from ignite.contrib.handlers import ProgressBar
 
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoTokenizer, AdamW, get_cosine_with_hard_restarts_schedule_with_warmup
+from transformers import AutoTokenizer, AdamW, \
+    get_cosine_with_hard_restarts_schedule_with_warmup, BertTokenizer, \
+    get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
 from torch.utils.data import random_split, DataLoader, SequentialSampler, RandomSampler
 
 from bertology_sklearn.models import BertologyForTokenClassification
 from bertology_sklearn.data_utils import TokenDataProcessor, token_load_and_cache_examples
+from bertology_sklearn.data_utils.common import to_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -42,40 +46,45 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                  do_lower_case=True, cache_dir="cache_model", data_dir="cache_data",
                  max_seq_length=512, overwrite_cache=False, output_dir="results",
                  dev_fraction=0.1, per_train_batch_size=8, per_val_batch_size=8,
-                 no_cuda=False, fp16=False, seed=42, overwrite_output_dir=False,
+                 no_cuda=False, seed=42, overwrite_output_dir=False,
                  classifier_dropout=0.5, classifier_type="Linear", kernel_num=3,
-                 kernel_sizes=(3,4,5), num_layers=2, weight_decay=1e-3,
+                 kernel_sizes=(3, 4, 5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
-                 warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3):
+                 warmup=0.1, fp16=False, fp16_opt_level='01', patience=3, n_saved=3,
+                 do_cv=False, schedule_type="linear"):
 
         super().__init__()
-        self.n_saved = n_saved
-        self.patience = patience
-        self.fp16_opt_level = fp16_opt_level
-        self.warmup = warmup
-        self.learning_rate = learning_rate
-        self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.max_epochs = max_epochs
-        self.weight_decay = weight_decay
-        self.num_layers = num_layers
-        self.kernel_sizes = kernel_sizes
-        self.kernel_num = kernel_num
-        self.classifier_type = classifier_type
-        self.classifier_dropout = classifier_dropout
-        self.overwrite_output_dir = overwrite_output_dir
-        self.fp16 = fp16
-        self.no_cuda = no_cuda
-        self.dev_fraction = dev_fraction
-        self.per_train_batch_size = per_train_batch_size
-        self.per_val_batch_size = per_val_batch_size
-        self.output_dir = output_dir
-        self.data_dir = data_dir
-        self.max_seq_length = max_seq_length
-        self.overwrite_cache = overwrite_cache
         self.model_name_or_path = model_name_or_path
         self.do_lower_case = do_lower_case
         self.cache_dir = cache_dir
+        self.data_dir = data_dir
+        self.max_seq_length = max_seq_length
+        self.overwrite_cache = overwrite_cache
+        self.output_dir = output_dir
+        self.dev_fraction = dev_fraction
+        self.per_train_batch_size = per_train_batch_size
+        self.per_val_batch_size = per_val_batch_size
+        self.overwrite_output_dir = overwrite_output_dir
+        self.no_cuda = no_cuda
+        self.classifier_type = classifier_type
+        self.classifier_dropout = classifier_dropout
+        self.num_layers = num_layers
+        self.kernel_sizes = kernel_sizes
+        self.kernel_num = kernel_num
+        self.weight_decay = weight_decay
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_epochs = max_epochs
+        self.learning_rate = learning_rate
+        self.warmup = warmup
+        self.fp16_opt_level = fp16_opt_level
+        self.fp16 = fp16
 
+        self.n_saved = n_saved
+        self.patience = patience
+        self.do_cv = do_cv
+
+        self.seed = seed
+        self.schedule_type = schedule_type
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
         self.n_gpu = torch.cuda.device_count() if not self.no_cuda else 1
@@ -111,18 +120,52 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
                     self.output_dir))
 
-        ## data
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
+        ## tokenizer
+        if 'chinese' in self.model_name_or_path:
+            tokenizer = BertTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
                                                   do_lower_case=self.do_lower_case,
                                                   cache_dir=self.cache_dir)
 
-        processor = TokenDataProcessor(X, y)
+        if self.do_cv:
+            kfold = KFold(n_splits=5, shuffle=True, random_state=self.seed)
+            cv = 0
+            X, y = to_numpy(X), to_numpy(y)
+            for train_index, dev_index in kfold.split(X, y):
+                cv += 1
+                ## data
+                X_train, X_dev = X[train_index], X[dev_index]
+                y_train, y_dev = y[train_index], y[dev_index]
 
-        dataset = token_load_and_cache_examples(self, tokenizer, processor)
+                self.overwrite_cache = True
 
-        ds_len = len(dataset)
-        dev_len = int(len(dataset) * self.dev_fraction)
-        train_ds, dev_ds = random_split(dataset, [ds_len - dev_len, dev_len])
+                train_processor = TokenDataProcessor(X_train, y_train)
+                dev_processor = TokenDataProcessor(X_dev, y_dev)
+
+                self.label_list = train_processor.get_labels()
+                self.num_labels = len(self.label_list)
+                train_ds = token_load_and_cache_examples(self, tokenizer, train_processor)
+                dev_ds = token_load_and_cache_examples(self, tokenizer, dev_processor)
+
+                self.single_fit(train_ds, dev_ds, cv=cv)
+        else:
+            ## data
+            processor = TokenDataProcessor(X, y)
+            dataset = token_load_and_cache_examples(self, tokenizer, processor)
+
+            self.label_list = processor.get_labels()
+            self.num_labels = len(self.label_list)
+
+            ds_len = len(dataset)
+            dev_len = int(len(dataset) * self.dev_fraction)
+            train_ds, dev_ds = random_split(dataset, [ds_len - dev_len, dev_len])
+            self.single_fit(train_ds, dev_ds)
+
+    def single_fit(self, train_ds, dev_ds, cv=None):
+        ## data_iter
         batch_size = self.n_gpu * self.per_train_batch_size
         train_sampler = RandomSampler(train_ds)
         train_iter = DataLoader(train_ds, sampler=train_sampler, batch_size=batch_size)
@@ -131,12 +174,10 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         dev_iter = DataLoader(dev_ds, sampler=dev_sampler, batch_size=batch_size)
 
         ## model
-        self.label_list = processor.get_labels()
-        self.num_labels = len(self.label_list)
-
         model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
                                                 num_labels=self.num_labels, cache_dir=self.cache_dir,
-                                                device=self.device,classifier_type=self.classifier_type,
+                                                device=self.device, dropout=self.classifier_dropout,
+                                                classifier_type=self.classifier_type,
                                                 num_layers=self.num_layers)
 
         model.to(self.device)
@@ -144,16 +185,27 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         ## optimizer
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
-            {'params': [p for n,p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
              'weight_decay': self.weight_decay},
             {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
 
         t_total = len(train_iter) // self.gradient_accumulation_steps * self.max_epochs
+        warmup_steps = t_total * self.warmup
 
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.learning_rate)
-        scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=t_total*self.warmup,
-                                                                       num_training_steps=t_total)
+
+        if self.schedule_type == "linear":
+            scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                        num_training_steps=t_total)
+        elif self.schedule_type == "cosine":
+            scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                        num_training_steps=t_total)
+        elif self.schedule_type == "constant":
+            scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps)
+        elif self.schedule_type == "cosine_restarts":
+            scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                                           num_training_steps=t_total)
         if self.fp16:
             try:
                 from apex import amp
@@ -178,9 +230,11 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 "token_type_ids": batch[2],
                 "labels": labels
             }
-            if self.classifier_type == "Linear":
+
+            if self.classifier_type == "Linear" or self.n_gpu <= 1:
                 loss, sequence_tags = model(**inputs)
-            else:
+
+            if self.n_gpu > 1 and "CRF" in self.classifier_type:
                 loss, sequence_tags = model.module.forward(**inputs)
 
             score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
@@ -189,9 +243,10 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 loss = loss.mean()
 
             ## tensorboard
-            tb_writer.add_scalar('learning_rate', scheduler.get_lr()[0], global_step_from_engine(engine))
-            tb_writer.add_scalar('train_loss', loss.item(), global_step_from_engine(engine))
-            tb_writer.add_scalar('train_score', score.item(), global_step_from_engine(engine))
+            global_step = global_step_from_engine(engine)(engine, engine.last_event_name)
+            tb_writer.add_scalar('learning_rate', scheduler.get_lr()[0], global_step)
+            tb_writer.add_scalar('train_loss', loss.item(), global_step)
+            tb_writer.add_scalar('train_score', score.item(), global_step)
 
             loss.backward()
             optimizer.step()
@@ -215,9 +270,10 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                     "token_type_ids": batch[2],
                     "labels": batch[3]
                 }
-                if self.classifier_type == "Linear":
+                if self.classifier_type == "Linear" or self.n_gpu <= 1:
                     loss, sequence_tags = model(**inputs)
-                else:
+
+                if self.n_gpu > 1 and "CRF" in self.classifier_type:
                     loss, sequence_tags = model.module.forward(**inputs)
 
                 score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
@@ -225,8 +281,9 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 if self.n_gpu > 1:
                     loss = loss.mean()
             ## tensorboard
-            tb_writer.add_scalar('dev_loss', loss.item(), global_step_from_engine(trainer))
-            tb_writer.add_scalar('dev_score', score.item(), global_step_from_engine(trainer))
+            global_step = global_step_from_engine(trainer)(engine, engine.last_event_name)
+            tb_writer.add_scalar('dev_loss', loss.item(), global_step)
+            tb_writer.add_scalar('dev_score', score.item(), global_step)
 
             return loss.item(), score.item()
 
@@ -255,7 +312,6 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 "Validation Results - Epoch: {}  Avg score: {:.2f} Avg loss: {:.2f}"
                     .format(engine.state.epoch, avg_score, avg_loss))
 
-
         l = self.model_name_or_path.split('/')
         if len(l) > 1:
             model_name = l[-1]
@@ -266,8 +322,11 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
             score = engine.state.metrics['score']
             return score
 
-        checkpointer = ModelCheckpoint(self.output_dir, "best", n_saved=self.n_saved,
-                                       create_dir=True,score_name="model_score",
+        model_prefix = "bert_{}".format(self.classifier_type.lower()) \
+            if cv is None else "bert_{}_cv_{}".format(self.classifier_type.lower(), cv)
+
+        checkpointer = ModelCheckpoint(self.output_dir, model_prefix, n_saved=self.n_saved,
+                                       create_dir=True, score_name="model_score",
                                        score_function=model_score,
                                        global_step_transform=global_step_from_engine(trainer))
         dev_evaluator.add_event_handler(Events.COMPLETED, checkpointer,
@@ -293,12 +352,20 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
         args = torch.load(os.path.join(self.output_dir, 'fit_args.pt'))
 
+
+        ## tokenizer
+        if 'chinese' in self.model_name_or_path:
+            tokenizer = BertTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+
         ## data
         processor = TokenDataProcessor(X)
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
-                                                  do_lower_case=self.do_lower_case,
-                                                  cache_dir=self.cache_dir)
-        dataset = token_load_and_cache_examples(self, tokenizer, processor, evaluate=True)
+        dataset = token_load_and_cache_examples(args, tokenizer, processor, evaluate=True)
 
         sampler = SequentialSampler(dataset)
         batch_size = self.per_val_batch_size * max(1, self.n_gpu)
@@ -306,9 +373,9 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
         ## model
         model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
-                                                num_labels=self.num_labels, cache_dir=self.cache_dir,
+                                                num_labels=args.num_labels, cache_dir=self.cache_dir,
                                                 device=self.device, classifier_type=self.classifier_type,
-                                                num_layers=self.num_layers)
+                                                num_layers=self.num_layers, dropout=self.classifier_dropout)
 
         y_preds = []
         for model_state_path in glob(os.path.join(self.output_dir, '*.pth')):
@@ -346,27 +413,27 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         for batch in tqdm(data_iter, desc="Predicting"):
             model.eval()
             batch = tuple(t.to(self.device) for t in batch)
-            labels = batch[3]
+            label_mask = batch[4]
             with torch.no_grad():
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
                     "token_type_ids": batch[2]
                 }
-                if self.classifier_type == "Linear":
+                if self.classifier_type == "Linear" or self.n_gpu <= 1:
                     _, sequence_tags = model(**inputs)
-                    sequence_tags = sequence_tags.detach.cpu().numpy()
-                else:
-                    _, sequence_tags = model.module.forward(**inputs)
-                    sequence_tags = np.array(sequence_tags)
 
-            labels = labels.detach.cpu().numpy()
+                if self.n_gpu > 1 and "CRF" in self.classifier_type:
+                    _, sequence_tags = model.module.forward(**inputs)
+
+            label_mask = label_mask.detach().cpu().numpy()
+            sequence_tags = sequence_tags.detach().cpu().numpy()
             if preds is None:
                 preds = sequence_tags
-                out_label_ids = labels
+                out_label_ids = label_mask
             else:
                 preds = np.append(preds, sequence_tags, axis=0)
-                out_label_ids = np.append(out_label_ids, labels, axis=0)
+                out_label_ids = np.append(out_label_ids, label_mask, axis=0)
 
         return preds, out_label_ids
 

@@ -58,12 +58,13 @@ class InputFeatures(object):
     """
     Single squad example features to be fed to a model.
     """
-    def __init__(self, input_ids, attention_mask, token_type_ids, label_ids=None):
+    def __init__(self, input_ids, attention_mask, token_type_ids, label_ids=None, label_mask=None):
 
         self.input_ids = input_ids
         self.attention_mask = attention_mask
         self.token_type_ids = token_type_ids
-        self.label = label_ids
+        self.label_ids = label_ids
+        self.label_mask = label_mask
 
     def __repr__(self):
         return str(self.to_json_string())
@@ -87,13 +88,18 @@ class DataProcessor:
         else:
             self.labels_list = np.full_like(self.words_list, fill_value='O')
 
+        self.y = y
+
     def get_labels(self):
-        return np.unique(np.ravel(self.labels_list))
+        label_list = [label for label_l in self.labels_list for label in label_l]
+        label_list = ['<PAD>'] + list(np.unique(label_list))
+        return label_list
 
     def get_examples(self):
         examples = []
         for i, (tokens, labels) in enumerate(zip(self.words_list, self.labels_list)):
-            examples.append(InputExample(guid="tokens-{}".format(i+1), tokens=tokens, labels=labels))
+            examples.append(InputExample(guid="tokens-{}".format(i+1),
+                                         tokens=tokens, labels=labels if self.y else ["O"]*len(tokens)))
         return examples
 
 def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
@@ -115,7 +121,8 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
         if not evaluate:
             label_list = processor.get_labels()
         else:
-            label_list = None
+            label_list = args.label_list
+        logger.info("label_list:{}".format(label_list))
 
         dataset = convert_examples_to_features(
             examples=examples,
@@ -123,36 +130,55 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
             max_seq_length=args.max_seq_length,
             label_list=label_list
         )
+        if not evaluate:
+            torch.save(dataset, cached_features_file)
 
     return dataset
 
+def pool_init_fn(tokenizer_for_convert):
+    global tokenizer
+    tokenizer = tokenizer_for_convert
+
 def convert_examples_to_features(examples, tokenizer, max_seq_length, label_list):
-    with Pool(cpu_count(),initializer=pool_init_fn, initargs=(tokenizer,)) as p:
+    label_map = {label:i for i, label in enumerate(label_list)}
+    with Pool(1, initializer=pool_init_fn, initargs=(tokenizer, )) as p:
         part_fn = partial(
             convert_example_to_features,
-            max_length=max_seq_length,
-            label_list=label_list
+            max_seq_length=max_seq_length,
+            label_map=label_map
         )
 
         features = list(
             tqdm(
-                p.imap(part_fn, examples),
+                p.imap(part_fn, examples, chunksize=32),
                 total=len(examples),
                 desc="convert examples to features",
             )
         )
+
+        for i, f in enumerate(features):
+           if i < 3:
+                logger.info("*** Example ***")
+                logger.info("{}th example".format(i+1))
+                logger.info("tokens: %s", " ".join(tokenizer.convert_ids_to_tokens(f.input_ids)))
+                logger.info("input_ids: %s", " ".join([str(x) for x in f.input_ids]))
+                logger.info("input_mask: %s", " ".join([str(x) for x in f.attention_mask]))
+                logger.info("segment_ids: %s", " ".join([str(x) for x in f.token_type_ids]))
+                logger.info("label_ids: %s", " ".join([str(x) for x in f.label_ids]))
+                logger.info("label_mask: %s", " ".join([str(x) for x in f.label_mask]))
 
         # Convert to Tensors and build dataset
         all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
         all_attention_masks = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
         all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
         all_labels_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
-        dataset = TensorDataset(all_input_ids, all_attention_masks, all_token_type_ids, all_labels_ids)
+        all_label_mask = torch.tensor([f.label_mask for f in features], dtype=torch.long)
+        dataset = TensorDataset(all_input_ids, all_attention_masks,
+                                all_token_type_ids, all_labels_ids, all_label_mask)
 
         return dataset
 
-def convert_example_to_features(example, max_seq_length,
-                                  label_list=None,
+def convert_example_to_features(example, max_seq_length,label_map,
                                 cls_token_at_end=False,
                                 cls_token="[CLS]",
                                 cls_token_segment_id=1,
@@ -166,36 +192,43 @@ def convert_example_to_features(example, max_seq_length,
                                 mask_padding_with_zero=True):
     tokens = []
     label_ids = []
+    label_mask = []
     for word, label in zip(example.tokens, example.labels):
         word_tokens = tokenizer.tokenize(word)
         if len(word_tokens) > 0:
             tokens.extend(word_tokens)
             # Use the real label id for the first token of the word, and padding ids for the remaining tokens
-            label_ids.extend([label_list.index[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+            label_ids.extend([label_map[label]] + [0] * (len(word_tokens) - 1))
+            label_mask.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
 
     # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
     special_tokens_count = 3 if sep_token_extra else 2
     if len(tokens) > max_seq_length - special_tokens_count:
         tokens = tokens[:(max_seq_length - special_tokens_count)]
         label_ids = label_ids[:(max_seq_length - special_tokens_count)]
+        label_mask = label_mask[:(max_seq_length - special_tokens_count)]
 
 
     tokens += [sep_token]
-    label_ids += [pad_token_label_id]
+    label_ids += [0]
+    label_mask += [pad_token_label_id]
     if sep_token_extra:
         # roberta uses an extra separator b/w pairs of sentences
         tokens += [sep_token]
-        label_ids += [pad_token_label_id]
+        label_ids += [0]
+        label_mask += [pad_token_label_id]
 
     segment_ids = [sequence_a_segment_id] * len(tokens)
 
     if cls_token_at_end:
         tokens += [cls_token]
-        label_ids += [pad_token_label_id]
+        label_ids += [0]
+        label_mask += [pad_token_label_id]
         segment_ids += [cls_token_segment_id]
     else:
         tokens = [cls_token] + tokens
-        label_ids = [pad_token_label_id] + label_ids
+        label_ids = [0] + label_ids
+        label_mask = [pad_token_label_id] + label_mask
         segment_ids = [cls_token_segment_id] + segment_ids
 
     input_ids = tokenizer.convert_tokens_to_ids(tokens)
@@ -210,36 +243,24 @@ def convert_example_to_features(example, max_seq_length,
         input_ids = ([pad_token] * padding_length) + input_ids
         input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
         segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
-        label_ids = ([pad_token_label_id] * padding_length) + label_ids
+        label_ids = ([0] * padding_length) + label_ids
+        label_mask = ([pad_token_label_id] * padding_length) + label_mask
     else:
         input_ids += ([pad_token] * padding_length)
         input_mask += ([0 if mask_padding_with_zero else 1] * padding_length)
         segment_ids += ([pad_token_segment_id] * padding_length)
-        label_ids += ([pad_token_label_id] * padding_length)
+        label_ids += ([0] * padding_length)
+        label_mask += ([pad_token_label_id] * padding_length)
 
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
     assert len(segment_ids) == max_seq_length
     assert len(label_ids) == max_seq_length
-
-    data_index += 1
-
-    if data_index < 5:
-        logger.info("*** Example ***")
-        logger.info("guid: %s", example.guid)
-        logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
-        logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
-        logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
-        logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
-        logger.info("label_ids: %s", " ".join([str(x) for x in label_ids]))
+    assert len(label_mask) == max_seq_length
 
     return InputFeatures(input_ids=input_ids,
                          attention_mask=input_mask,
                          token_type_ids=segment_ids,
-                         label_ids=label_ids)
+                         label_ids=label_ids,
+                         label_mask=label_mask)
 
-
-def pool_init_fn(tokenizer_for_convert):
-    global tokenizer, data_index
-    data_index = 0
-    tokenizer = tokenizer_for_convert

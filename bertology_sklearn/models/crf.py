@@ -26,6 +26,8 @@ class CRF(nn.Module):
         self.end_transitions = nn.Parameter(torch.empty(num_tags, device=device))
         self.transitions = nn.Parameter(torch.empty((num_tags, num_tags), device=device))
 
+        self.reset_parameters()
+
         self.device = device
 
     def reset_parameters(self) -> None:
@@ -59,7 +61,7 @@ class CRF(nn.Module):
         # shape: (batch_size,)
         llh = numerator - denominator
 
-        return llh.mean()
+        return llh.sum() / mask.type_as(emissions).sum()
 
     def decode(self,
                emissions: torch.Tensor,
@@ -89,7 +91,7 @@ class CRF(nn.Module):
         # Start transition score and first emission
         # shape: (batch_size,)
         score = self.start_transitions[tags[0]]
-        score += emissions[0, torch.arange(batch_size), tags[0]]
+        score += emissions[0, torch.arange(batch_size, device=self.device), tags[0]]
 
         for i in range(1, seq_length):
             # Transition score to next tag, only added if next timestep is valid (mask == 1)
@@ -98,13 +100,13 @@ class CRF(nn.Module):
 
             # Emission score for next tag, only added if next timestep is valid (mask == 1)
             # shape: (batch_size,)
-            score += emissions[i, torch.arange(batch_size), tags[i]] * mask[i]
+            score += emissions[i, torch.arange(batch_size, device=self.device), tags[i]] * mask[i]
 
         # End transition score
         # shape: (batch_size,)
         seq_ends = mask.long().sum(dim=0) - 1
         # shape: (batch_size,)
-        last_tags = tags[seq_ends, torch.arange(batch_size)]
+        last_tags = tags[seq_ends, torch.arange(batch_size,device=self.device)]
         # shape: (batch_size,)
         score += self.end_transitions[last_tags]
 
@@ -162,7 +164,7 @@ class CRF(nn.Module):
         return torch.logsumexp(score, dim=1)
 
     def _viterbi_decode(self, emissions: torch.FloatTensor,
-                        mask: torch.ByteTensor) -> List[List[int]]:
+                        mask: torch.ByteTensor) -> torch.Tensor:
         # emissions: (seq_length, batch_size, num_tags)
         # mask: (seq_length, batch_size)
         assert emissions.dim() == 3 and mask.dim() == 2
@@ -236,4 +238,11 @@ class CRF(nn.Module):
             best_tags.reverse()
             best_tags_list.append(best_tags)
 
-        return best_tags_list
+        tags = []
+        for tag in best_tags_list:
+            tag_len = len(tag)
+            pad_len = seq_length - tag_len
+            tag = tag + [0.] * pad_len
+            assert len(tag) == seq_length
+            tags.append(tag)
+        return torch.tensor(tags, dtype=torch.long, device=self.device)
