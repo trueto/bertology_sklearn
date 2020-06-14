@@ -214,7 +214,7 @@ def convert_example_to_features(example, max_length,
                                                                                             max_length)
         assert len(token_type_ids) == max_length, "Error with input length {} vs {}".format(len(token_type_ids),max_length)
 
-        if label_map is not None:
+        if example.label is not None:
             label = label_map[example.label]
         else:
             label = example.label

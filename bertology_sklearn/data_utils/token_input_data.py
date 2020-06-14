@@ -99,7 +99,7 @@ class DataProcessor:
         examples = []
         for i, (tokens, labels) in enumerate(zip(self.words_list, self.labels_list)):
             examples.append(InputExample(guid="tokens-{}".format(i+1),
-                                         tokens=tokens, labels=labels if self.y else ["O"]*len(tokens)))
+                                         tokens=tokens, labels=labels if self.y is not None else ["O"]*len(tokens)))
         return examples
 
 def load_and_cache_examples(args, tokenizer, processor, evaluate=False):

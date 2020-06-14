@@ -31,7 +31,8 @@ from ignite.contrib.handlers import ProgressBar
 
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoTokenizer, AdamW, \
-    get_cosine_with_hard_restarts_schedule_with_warmup, BertTokenizer
+    get_cosine_with_hard_restarts_schedule_with_warmup, BertTokenizer, \
+    get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
 from torch.utils.data import random_split, DataLoader, SequentialSampler, RandomSampler
 
 from bertology_sklearn.models import BertologyForClassification
@@ -51,7 +52,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3,4,5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
-                 task_type="classify", do_cv=False):
+                 task_type="classify", do_cv=False, schedule_type="linear"):
 
         super().__init__()
         self.task_type = task_type
@@ -83,6 +84,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.cache_dir = cache_dir
 
         self.do_cv = do_cv
+        self.seed = seed
+        self.schedule_type = schedule_type
 
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
@@ -174,7 +177,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         model = BertologyForClassification(model_name_or_path=self.model_name_or_path,
                                            num_labels=self.num_labels,cache_dir=self.cache_dir,
                                            dropout=self.classifier_dropout,kernel_num=self.kernel_num,
-                                           kernel_sizes=self.kernel_sizes,num_layers=self.num_layers)
+                                           kernel_sizes=self.kernel_sizes,num_layers=self.num_layers,
+                                           classifier_type=self.classifier_type)
 
         model.to(self.device)
 
@@ -189,8 +193,19 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         t_total = len(train_iter) // self.gradient_accumulation_steps * self.max_epochs
 
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.learning_rate)
-        scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=t_total*self.warmup,
-                                                                       num_training_steps=t_total)
+        warmup_steps = t_total * self.warmup
+
+        if self.schedule_type == "linear":
+            scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                        num_training_steps=t_total)
+        elif self.schedule_type == "cosine":
+            scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                        num_training_steps=t_total)
+        elif self.schedule_type == "constant":
+            scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps)
+        elif self.schedule_type == "cosine_restarts":
+            scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps,
+                                                                           num_training_steps=t_total)
         if self.fp16:
             try:
                 from apex import amp
@@ -220,15 +235,21 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 loss_fn = nn.MSELoss()
                 loss = loss_fn(logits.view(-1), labels.view(-1))
                 preds = logits.view(-1)
-                score = (spearmanr(preds, labels)[0] + pearsonr(preds, labels)) / 2
+
+                labels_np = labels.detach().cpu().numpy()
+                preds_np = preds.detach().cpu().numpy()
+                score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
             else:
                 loss_fct = nn.CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
                 preds = logits.argmax(dim=-1)
+
+                labels_np = labels.detach().cpu().numpy()
+                preds_np = preds.detach().cpu().numpy()
                 if self.num_labels == 2:
-                    score = f1_score(labels, preds)
+                    score = f1_score(labels_np, preds_np)
                 else:
-                    score = f1_score(labels, preds, average="macro")
+                    score = f1_score(labels_np, preds_np, average="macro")
 
             if self.n_gpu > 1:
                 loss = loss.mean()
@@ -266,15 +287,21 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     loss_fn = nn.MSELoss()
                     loss = loss_fn(logits.view(-1), labels.view(-1))
                     preds = logits.view(-1)
-                    score = (spearmanr(preds, labels)[0] + pearsonr(preds, labels)) / 2
+
+                    labels_np = labels.detach().cpu().numpy()
+                    preds_np = preds.detach().cpu().numpy()
+                    score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
                 else:
                     loss_fct = nn.CrossEntropyLoss()
                     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
                     preds = logits.argmax(dim=-1)
+
+                    labels_np = labels.detach().cpu().numpy()
+                    preds_np = preds.detach().cpu().numpy()
                     if self.num_labels == 2:
-                        score = f1_score(labels, preds)
+                        score = f1_score(labels_np, preds_np)
                     else:
-                        score = f1_score(labels, preds, average="macro")
+                        score = f1_score(labels_np, preds_np, average="macro")
 
                 if self.n_gpu > 1:
                     loss = loss.mean()
@@ -327,7 +354,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         checkpointer = ModelCheckpoint(self.output_dir, model_prefix, n_saved=self.n_saved,
                                        create_dir=True,score_name="model_score",
                                        score_function=model_score,
-                                       global_step_transform=global_step_from_engine(trainer))
+                                       global_step_transform=global_step_from_engine(trainer),
+                                       require_empty=False)
         dev_evaluator.add_event_handler(Events.COMPLETED, checkpointer,
                                         {model_name: model.module if hasattr(model, 'module') else model})
 
@@ -353,10 +381,17 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
 
         ## data
         processor = TextDataProcessor(X)
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
-                                                  do_lower_case=self.do_lower_case,
-                                                  cache_dir=self.cache_dir)
-        dataset = text_load_and_cache_examples(self, tokenizer, processor, evaluate=True)
+
+        if 'chinese' in self.model_name_or_path:
+            tokenizer = BertTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path,
+                                                      do_lower_case=self.do_lower_case,
+                                                      cache_dir=self.cache_dir)
+
+        dataset = text_load_and_cache_examples(args, tokenizer, processor, evaluate=True)
 
         sampler = SequentialSampler(dataset)
         batch_size = self.per_val_batch_size * max(1, self.n_gpu)

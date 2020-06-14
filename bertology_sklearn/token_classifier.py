@@ -322,13 +322,14 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
             score = engine.state.metrics['score']
             return score
 
-        model_prefix = "bert_{}".format(self.classifier_type.lower()) \
-            if cv is None else "bert_{}_cv_{}".format(self.classifier_type.lower(), cv)
+        model_prefix = "bertology_{}".format(self.classifier_type.lower()) \
+            if cv is None else "bertology_{}_cv_{}".format(self.classifier_type.lower(), cv)
 
         checkpointer = ModelCheckpoint(self.output_dir, model_prefix, n_saved=self.n_saved,
                                        create_dir=True, score_name="model_score",
                                        score_function=model_score,
-                                       global_step_transform=global_step_from_engine(trainer))
+                                       global_step_transform=global_step_from_engine(trainer),
+                                       require_empty=False)
         dev_evaluator.add_event_handler(Events.COMPLETED, checkpointer,
                                         {model_name: model.module if hasattr(model, 'module') else model})
 
