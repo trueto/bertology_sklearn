@@ -12,8 +12,10 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 import torch
+import numpy as np
 import torch.nn as nn
 from typing import Optional, List
+
 
 # refer to: https://github.com/kmkurn/pytorch-crf
 class CRF(nn.Module):
@@ -178,6 +180,7 @@ class CRF(nn.Module):
         # shape: (batch_size, num_tags)
         score = self.start_transitions + emissions[0]
         history = []
+        # history = None
 
         # score is a tensor of size (batch_size, num_tags) where for every batch,
         # value at column j stores the score of the best tag sequence so far that ends
@@ -211,6 +214,11 @@ class CRF(nn.Module):
             # shape: (batch_size, num_tags)
             score = torch.where(mask[i].unsqueeze(1), next_score, score)
             history.append(indices)
+            # indices = torch.tensor(indices, dtype=torch.long, device=self.device)
+            # if history is None:
+            #    history = indices
+            # else:
+            #    history = torch.stack((history, indices))
 
         # End transition score
         # shape: (batch_size, num_tags)
@@ -221,28 +229,50 @@ class CRF(nn.Module):
         # shape: (batch_size,)
         seq_ends = mask.long().sum(dim=0) - 1
         best_tags_list = []
+        # best_tags_list = None
 
         for idx in range(batch_size):
             # Find the tag which maximizes the score at the last timestep; this is our best tag
             # for the last timestep
             _, best_last_tag = score[idx].max(dim=0)
             best_tags = [best_last_tag.item()]
+            # best_tags = torch.tensor([best_last_tag.item()], dtype=torch.long, device=self.device)
 
             # We trace back where the best last tag comes from, append that to our best tag
             # sequence, and trace it back again, and so on
             for hist in reversed(history[:seq_ends[idx]]):
                 best_last_tag = hist[idx][best_tags[-1]]
+                best_last_tag = torch.tensor([best_last_tag], dtype=torch.long, device=self.device)
                 best_tags.append(best_last_tag.item())
+                # best_tags = torch.cat((best_tags, best_last_tag))
 
             # Reverse the order because we start from the last timestep
             best_tags.reverse()
-            best_tags_list.append(best_tags)
-
-        tags = []
-        for tag in best_tags_list:
-            tag_len = len(tag)
+            # best_tags = reversed(best_tags)
+            tag_len = len(best_tags)
             pad_len = seq_length - tag_len
-            tag = tag + [0.] * pad_len
-            assert len(tag) == seq_length
-            tags.append(tag)
-        return torch.tensor(tags, dtype=torch.long, device=self.device)
+            # pad_tags = torch.tensor([0]*pad_len, dtype=torch.long, device=self.device)
+
+            # best_tags = torch.cat((best_tags, pad_tags))
+            best_tags = best_tags + [0] * pad_len
+            assert len(best_tags) == seq_length
+
+            # best_tags_np = best_tags.detach().cpu().numpy()
+            best_tags_list.append(best_tags)
+            # if best_tags_list is None:
+            #    best_tags_list = best_tags_np
+            # else:
+            #    print(best_tags_list.shape)
+            #    print(best_tags.shape)
+            #    best_tags_list = np.append(best_tags_list, best_tags_np, axis=0)
+
+        return torch.tensor(best_tags_list, dtype=torch.long, device=self.device)
+
+        # tags = []
+        # for tag in best_tags_list:
+        #    tag_len = len(tag)
+        #    pad_len = seq_length - tag_len
+        #    tag = tag + [0.] * pad_len
+        #    assert len(tag) == seq_length
+        #    tags.append(tag)
+        # return torch.tensor(tags, dtype=torch.long, device=self.device)

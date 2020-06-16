@@ -231,11 +231,13 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 "labels": labels
             }
 
-            if self.classifier_type == "Linear" or self.n_gpu <= 1:
-                loss, sequence_tags = model(**inputs)
+            loss, sequence_tags = model(**inputs)
 
-            if self.n_gpu > 1 and "CRF" in self.classifier_type:
-                loss, sequence_tags = model.module.forward(**inputs)
+            # if self.classifier_type == "Linear" or self.n_gpu <= 1:
+            #    loss, sequence_tags = model(**inputs)
+
+            # if self.n_gpu > 1 and "CRF" in self.classifier_type:
+            #    loss, sequence_tags = model.module.forward(**inputs)
 
             score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
 
@@ -270,11 +272,12 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                     "token_type_ids": batch[2],
                     "labels": batch[3]
                 }
-                if self.classifier_type == "Linear" or self.n_gpu <= 1:
-                    loss, sequence_tags = model(**inputs)
+                loss, sequence_tags = model(**inputs)
+                # if self.classifier_type == "Linear" or self.n_gpu <= 1:
+                #    loss, sequence_tags = model(**inputs)
 
-                if self.n_gpu > 1 and "CRF" in self.classifier_type:
-                    loss, sequence_tags = model.module.forward(**inputs)
+                # if self.n_gpu > 1 and "CRF" in self.classifier_type:
+                #    loss, sequence_tags = model.module.forward(**inputs)
 
                 score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
 
@@ -421,11 +424,12 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                     "attention_mask": batch[1],
                     "token_type_ids": batch[2]
                 }
-                if self.classifier_type == "Linear" or self.n_gpu <= 1:
-                    _, sequence_tags = model(**inputs)
+                _, sequence_tags = model(**inputs)
+                # if self.classifier_type == "Linear" or self.n_gpu <= 1:
+                #    _, sequence_tags = model(**inputs)
 
-                if self.n_gpu > 1 and "CRF" in self.classifier_type:
-                    _, sequence_tags = model.module.forward(**inputs)
+                # if self.n_gpu > 1 and "CRF" in self.classifier_type:
+                #    _, sequence_tags = model.module.forward(**inputs)
 
             label_mask = label_mask.detach().cpu().numpy()
             sequence_tags = sequence_tags.detach().cpu().numpy()
