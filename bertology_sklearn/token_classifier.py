@@ -51,7 +51,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3, 4, 5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16=False, fp16_opt_level='01', patience=3, n_saved=3,
-                 do_cv=False, schedule_type="linear"):
+                 do_cv=False, schedule_type="linear", lstm_hidden_size=32):
 
         super().__init__()
         self.model_name_or_path = model_name_or_path
@@ -85,6 +85,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
         self.seed = seed
         self.schedule_type = schedule_type
+        self.lstm_hidden_size = lstm_hidden_size
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
         self.n_gpu = torch.cuda.device_count() if not self.no_cuda else 1
@@ -178,7 +179,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                                                 num_labels=self.num_labels, cache_dir=self.cache_dir,
                                                 device=self.device, dropout=self.classifier_dropout,
                                                 classifier_type=self.classifier_type,
-                                                num_layers=self.num_layers)
+                                                num_layers=self.num_layers, lstm_hidden_size=self.lstm_hidden_size)
 
         model.to(self.device)
 
@@ -239,7 +240,20 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
             # if self.n_gpu > 1 and "CRF" in self.classifier_type:
             #    loss, sequence_tags = model.module.forward(**inputs)
 
-            score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
+            # score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
+
+            score = (sequence_tags == labels).float().detach().cpu().numpy()
+
+            # print("before: {}".format(score))
+
+            condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+            # print(condition_1.sum())
+            condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+            # print(condition_2.sum())
+            patten = np.logical_and(condition_1, condition_2)
+            # print(patten.sum())
+            score = score[patten].mean()
+            # print("after: {}".format(score))
 
             if self.n_gpu > 1:
                 loss = loss.mean()
@@ -279,10 +293,17 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 # if self.n_gpu > 1 and "CRF" in self.classifier_type:
                 #    loss, sequence_tags = model.module.forward(**inputs)
 
-                score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
+                # score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
+
+                score = (sequence_tags == labels).float().detach().cpu().numpy()
+                condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+                condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+                patten = np.logical_and(condition_1, condition_2)
+                score = score[patten].mean()
 
                 if self.n_gpu > 1:
                     loss = loss.mean()
+
             ## tensorboard
             global_step = global_step_from_engine(trainer)(engine, engine.last_event_name)
             tb_writer.add_scalar('dev_loss', loss.item(), global_step)
@@ -379,7 +400,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
                                                 num_labels=args.num_labels, cache_dir=self.cache_dir,
                                                 device=self.device, classifier_type=self.classifier_type,
-                                                num_layers=self.num_layers, dropout=self.classifier_dropout)
+                                                num_layers=self.num_layers, dropout=self.classifier_dropout,
+                                                lstm_hidden_size=self.lstm_hidden_size)
 
         y_preds = []
         for model_state_path in glob(os.path.join(self.output_dir, '*.pth')):

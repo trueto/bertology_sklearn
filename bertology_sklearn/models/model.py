@@ -82,7 +82,8 @@ class BertologyForTokenClassification(nn.Module):
 
     def __init__(self, model_name_or_path,
                  num_labels, cache_dir, dropout,
-                 device, classifier_type="Linear",num_layers=2):
+                 device, classifier_type="Linear",
+                 num_layers=2, lstm_hidden_size=32):
 
         super().__init__()
         self.bertology_model = BertologyModel(model_name_or_path, cache_dir)
@@ -100,9 +101,9 @@ class BertologyForTokenClassification(nn.Module):
             self.crf = CRF(num_labels, device=device)
         elif classifier_type == "LSTM_CRF":
             self.token_classifier = nn.Sequential(
-                LSTM(self.bertology_model.config.hidden_size, num_layers=num_layers),
+                LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers),
                 nn.Dropout(dropout),
-                nn.Linear(self.bertology_model.config.hidden_size, num_labels)
+                nn.Linear(2*lstm_hidden_size, num_labels)
             )
             self.crf = CRF(num_labels, device=device)
 

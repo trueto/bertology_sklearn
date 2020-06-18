@@ -61,11 +61,14 @@ class TextRNN(nn.Module):
             return self.bn(torch.mean(rnn_output, dim=1))
 
 class LSTM(nn.Module):
-    def __init__(self, input_size, num_layers):
+    def __init__(self, input_size, hidden_size, num_layers):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, input_size // 2, num_layers=num_layers,
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers,
                 dropout=0.5, batch_first=True, bidirectional=True)
 
     def forward(self, hidden_states):
+        if not hasattr(self, '_flattened'):
+            self.lstm.flatten_parameters()
+            setattr(self, '_flattened', True)
         lstm_out, _ = self.lstm(hidden_states, None)
         return lstm_out
