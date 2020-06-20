@@ -92,7 +92,8 @@ class DataProcessor:
 
     def get_labels(self):
         label_list = [label for label_l in self.labels_list for label in label_l]
-        label_list = ['<PAD>'] + list(np.unique(label_list))
+        # label_list = ['<PAD>'] + list(np.unique(label_list))
+        label_list = ['<PAD>', '<START>'] + list(np.unique(label_list)) + ['<END>']
         return label_list
 
     def get_examples(self):
@@ -210,7 +211,8 @@ def convert_example_to_features(example, max_seq_length,label_map,
 
 
     tokens += [sep_token]
-    label_ids += [0]
+    # label_ids += [0]
+    label_ids += [label_map['<END>']]
     label_mask += [pad_token_label_id]
     if sep_token_extra:
         # roberta uses an extra separator b/w pairs of sentences
@@ -227,7 +229,8 @@ def convert_example_to_features(example, max_seq_length,label_map,
         segment_ids += [cls_token_segment_id]
     else:
         tokens = [cls_token] + tokens
-        label_ids = [0] + label_ids
+        # label_ids = [0] + label_ids
+        label_ids = [label_map['<START>']] + label_ids
         label_mask = [pad_token_label_id] + label_mask
         segment_ids = [cls_token_segment_id] + segment_ids
 

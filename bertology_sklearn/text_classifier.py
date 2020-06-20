@@ -35,7 +35,7 @@ from transformers import AutoTokenizer, AdamW, \
     get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
 from torch.utils.data import random_split, DataLoader, SequentialSampler, RandomSampler
 
-from bertology_sklearn.models import BertologyForClassification
+from bertology_sklearn.models import BertologyForClassification, Focal_Loss
 from bertology_sklearn.data_utils.common import to_numpy
 from bertology_sklearn.data_utils import text_load_and_cache_examples, TextDataProcessor
 
@@ -52,7 +52,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3,4,5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
-                 task_type="classify", do_cv=False, schedule_type="linear"):
+                 task_type="classify", do_cv=False, schedule_type="linear",
+                 focal_loss=False):
 
         super().__init__()
         self.task_type = task_type
@@ -86,6 +87,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.do_cv = do_cv
         self.seed = seed
         self.schedule_type = schedule_type
+        self.focal_loss = focal_loss
 
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
@@ -105,6 +107,12 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         torch.manual_seed(seed)
         if self.n_gpu > 0:
             torch.cuda.manual_seed_all(seed)
+
+    def init_focal_loss_params(self, y):
+        y_np = to_numpy(y)
+        y_int = [self.label_list.index(label) for label in y_np]
+        alpha = np.bincount(y_int) / len(y_int)
+        return list(alpha)
 
     def fit(self, X, y, sample_weight=None):
 
@@ -152,6 +160,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 train_ds = text_load_and_cache_examples(self, tokenizer, train_processor)
                 dev_ds = text_load_and_cache_examples(self, tokenizer, dev_processor)
 
+                if self.focal_loss:
+                    self.alpha = self.init_focal_loss_params(y)
+
                 self.single_fit(train_ds, dev_ds, cv=cv)
         else:
             processor = TextDataProcessor(X, y)
@@ -162,7 +173,12 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
             ds_len = len(dataset)
             dev_len = int(len(dataset) * self.dev_fraction)
             train_ds, dev_ds = random_split(dataset, [ds_len - dev_len, dev_len])
+
+            if self.focal_loss:
+                self.alpha = self.init_focal_loss_params(y)
+
             self.single_fit(train_ds, dev_ds)
+
 
     def single_fit(self, train_ds, dev_ds, cv=None):
         ## data
@@ -240,7 +256,11 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 preds_np = preds.detach().cpu().numpy()
                 score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
             else:
-                loss_fct = nn.CrossEntropyLoss()
+                if self.focal_loss:
+                    loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
+                else:
+                    loss_fct = nn.CrossEntropyLoss()
+
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
                 preds = logits.argmax(dim=-1)
 
@@ -292,7 +312,11 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     preds_np = preds.detach().cpu().numpy()
                     score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
                 else:
-                    loss_fct = nn.CrossEntropyLoss()
+                    #loss_fct = nn.CrossEntropyLoss()
+                    if self.focal_loss:
+                        loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
+                    else:
+                        loss_fct = nn.CrossEntropyLoss()
                     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
                     preds = logits.argmax(dim=-1)
 

@@ -13,3 +13,4 @@
 #   limitations under the License.
 
 from .model import BertologyForClassification, BertologyForTokenClassification
+from .focal_loss import Focal_Loss

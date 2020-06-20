@@ -91,19 +91,22 @@ class BertologyForTokenClassification(nn.Module):
         if classifier_type == "Linear":
             self.token_classifier = nn.Sequential(
                 nn.Dropout(dropout),
+                # nn.Softmax(),
                 nn.Linear(self.bertology_model.config.hidden_size, num_labels)
             )
         elif classifier_type == "CRF":
             self.token_classifier = nn.Sequential(
                 nn.Dropout(dropout),
-                nn.Linear(self.bertology_model.config.hidden_size, num_labels)
+                # nn.Softmax(),
+                nn.Linear(self.bertology_model.config.hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
         elif classifier_type == "LSTM_CRF":
             self.token_classifier = nn.Sequential(
-                LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers),
                 nn.Dropout(dropout),
-                nn.Linear(2*lstm_hidden_size, num_labels)
+                LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers),
+                # nn.Softmax(),
+                nn.Linear(2*lstm_hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
 
