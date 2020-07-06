@@ -53,7 +53,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
                  task_type="classify", do_cv=False, schedule_type="linear",
-                 focal_loss=False):
+                 focal_loss=False, k_fold=5):
 
         super().__init__()
         self.task_type = task_type
@@ -85,6 +85,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.cache_dir = cache_dir
 
         self.do_cv = do_cv
+        self.k_fold = k_fold
         self.seed = seed
         self.schedule_type = schedule_type
         self.focal_loss = focal_loss
@@ -141,7 +142,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                                                       cache_dir=self.cache_dir)
 
         if self.do_cv:
-            kfold = KFold(n_splits=5, shuffle=True, random_state=self.seed)
+            kfold = KFold(n_splits=self.k_fold, shuffle=True, random_state=self.seed)
             cv = 0
             X, y = to_numpy(X), to_numpy(y)
             for train_index, dev_index in kfold.split(X, y):
@@ -346,8 +347,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         pbar.attach(dev_evaluator, ['loss', 'score'])
 
         def score_fn(engine):
-            loss = engine.state.metrics['loss']
-            return -loss
+            score = engine.state.metrics['score']
+            return score
 
         handler = EarlyStopping(patience=self.patience, score_function=score_fn, trainer=trainer)
         dev_evaluator.add_event_handler(Events.COMPLETED, handler)

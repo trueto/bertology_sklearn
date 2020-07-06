@@ -15,7 +15,7 @@
 import torch
 import torch.nn as nn
 from .bertology import BertologyModel
-from .rnns import TextCNN, TextRNN, LSTM
+from .rnns import TextCNN, TextRNN, LSTM, GRU
 from .crf import CRF
 from transformers import BertForTokenClassification
 class BertologyForClassification(nn.Module):
@@ -36,16 +36,16 @@ class BertologyForClassification(nn.Module):
 
         elif classifier_type == "TextCNN":
             self.classifier = nn.Sequential(
-                TextCNN(self.bertology_model.config.hidden_size, kernel_num, kernel_sizes),
                 nn.Dropout(dropout),
+                TextCNN(self.bertology_model.config.hidden_size, kernel_num, kernel_sizes),
                 nn.Linear(len(kernel_sizes)*kernel_num, num_labels)
             )
 
         else:
             self.classifier = nn.Sequential(
-                TextRNN(self.bertology_model.config.hidden_size, num_layers=num_layers,
-                        rnn_model=classifier_type),
                 nn.Dropout(dropout),
+                TextRNN(self.bertology_model.config.hidden_size, dropout=dropout, num_layers=num_layers,
+                        rnn_model=classifier_type),
                 nn.Linear(self.bertology_model.config.hidden_size, num_labels)
             )
 
@@ -97,16 +97,24 @@ class BertologyForTokenClassification(nn.Module):
         elif classifier_type == "CRF":
             self.token_classifier = nn.Sequential(
                 nn.Dropout(dropout),
-                # nn.Softmax(),
                 nn.Linear(self.bertology_model.config.hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
         elif classifier_type == "LSTM_CRF":
             self.token_classifier = nn.Sequential(
                 nn.Dropout(dropout),
-                LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers),
-                # nn.Softmax(),
+                LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers,
+                     dropout=dropout),
                 nn.Linear(2*lstm_hidden_size, num_labels),
+            )
+            self.crf = CRF(num_labels, device=device)
+
+        elif classifier_type == "GRU_CRF":
+            self.token_classifier = nn.Sequential(
+                nn.Dropout(dropout),
+                GRU(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers,
+                     dropout=dropout),
+                nn.Linear(2 * lstm_hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
 

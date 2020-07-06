@@ -51,7 +51,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3, 4, 5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16=False, fp16_opt_level='01', patience=3, n_saved=3,
-                 do_cv=False, schedule_type="linear", lstm_hidden_size=32):
+                 do_cv=False, schedule_type="linear", lstm_hidden_size=32, k_fold=5):
 
         super().__init__()
         self.model_name_or_path = model_name_or_path
@@ -82,6 +82,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         self.n_saved = n_saved
         self.patience = patience
         self.do_cv = do_cv
+        self.k_fold = k_fold
 
         self.seed = seed
         self.schedule_type = schedule_type
@@ -132,7 +133,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                                                   cache_dir=self.cache_dir)
 
         if self.do_cv:
-            kfold = KFold(n_splits=5, shuffle=True, random_state=self.seed)
+            kfold = KFold(n_splits=self.k_fold, shuffle=True, random_state=self.seed)
             cv = 0
             X, y = to_numpy(X), to_numpy(y)
             for train_index, dev_index in kfold.split(X, y):

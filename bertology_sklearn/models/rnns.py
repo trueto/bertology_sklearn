@@ -40,14 +40,14 @@ class TextCNN(nn.Module):
 # refer to: https://github.com/keishinkickback/Pytorch-RNN-text-classification/blob/master/model.py
 class TextRNN(nn.Module):
 
-    def __init__(self, input_size, num_layers, rnn_model="LSTM", use_first=True):
+    def __init__(self, input_size, num_layers, dropout,rnn_model="LSTM", use_first=True):
         super().__init__()
         if rnn_model == "LSTM":
             self.rnn = nn.LSTM(input_size, input_size//2, num_layers=num_layers,
-                               dropout=0.5, batch_first=True, bidirectional=True)
+                               dropout=dropout, batch_first=True, bidirectional=True)
         if rnn_model == "GRU":
             self.rnn = nn.GRU(input_size, input_size//2, num_layers=num_layers,
-                              dropout=0.5, batch_first=True, bidirectional=True)
+                              dropout=dropout, batch_first=True, bidirectional=True)
 
         self.bn = nn.BatchNorm1d(input_size)
         self.use_first = use_first
@@ -61,10 +61,10 @@ class TextRNN(nn.Module):
             return self.bn(torch.mean(rnn_output, dim=1))
 
 class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers):
+    def __init__(self, input_size, hidden_size, num_layers, dropout):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers=num_layers,
-                dropout=0.5, batch_first=True, bidirectional=True)
+                dropout=dropout, batch_first=True, bidirectional=True)
 
     def forward(self, hidden_states):
         if not hasattr(self, '_flattened'):
@@ -72,3 +72,16 @@ class LSTM(nn.Module):
             setattr(self, '_flattened', True)
         lstm_out, _ = self.lstm(hidden_states, None)
         return lstm_out
+
+class GRU(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, dropout):
+        super().__init__()
+        self.gru = nn.GRU(input_size, hidden_size, num_layers=num_layers,
+                dropout=dropout, batch_first=True, bidirectional=True)
+
+    def forward(self, hidden_states):
+        if not hasattr(self, '_flattened'):
+            self.gru.flatten_parameters()
+            setattr(self, '_flattened', True)
+        gru_out, _ = self.gru(hidden_states, None)
+        return gru_out
