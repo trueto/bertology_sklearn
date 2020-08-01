@@ -47,7 +47,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                  max_seq_length=512, overwrite_cache=False, output_dir="results",
                  dev_fraction=0.1, per_train_batch_size=8, per_val_batch_size=8,
                  no_cuda=False, seed=42, overwrite_output_dir=False,
-                 classifier_dropout=0.5, classifier_type="Linear", kernel_num=3,
+                 bert_dropout=0.1, lstm_dropout=0.5, classifier_type="Linear", kernel_num=3,
                  kernel_sizes=(3, 4, 5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16=False, fp16_opt_level='01', patience=3, n_saved=3,
@@ -67,7 +67,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         self.overwrite_output_dir = overwrite_output_dir
         self.no_cuda = no_cuda
         self.classifier_type = classifier_type
-        self.classifier_dropout = classifier_dropout
+        self.bert_dropout = bert_dropout
+        self.lstm_dropout = lstm_dropout
         self.num_layers = num_layers
         self.kernel_sizes = kernel_sizes
         self.kernel_num = kernel_num
@@ -178,7 +179,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         ## model
         model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
                                                 num_labels=self.num_labels, cache_dir=self.cache_dir,
-                                                device=self.device, dropout=self.classifier_dropout,
+                                                device=self.device, bert_dropout=self.bert_dropout,
+                                                lstm_dropout=self.lstm_dropout,
                                                 classifier_type=self.classifier_type,
                                                 num_layers=self.num_layers, lstm_hidden_size=self.lstm_hidden_size)
 
@@ -322,7 +324,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
         def score_fn(engine):
             loss = engine.state.metrics['loss']
-            return -loss
+            score = engine.state.metrics['score']
+            return score / (loss + 1e-12)
 
         handler = EarlyStopping(patience=self.patience, score_function=score_fn, trainer=trainer)
         dev_evaluator.add_event_handler(Events.COMPLETED, handler)
@@ -401,7 +404,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         model = BertologyForTokenClassification(model_name_or_path=self.model_name_or_path,
                                                 num_labels=args.num_labels, cache_dir=self.cache_dir,
                                                 device=self.device, classifier_type=self.classifier_type,
-                                                num_layers=self.num_layers, dropout=self.classifier_dropout,
+                                                num_layers=self.num_layers,  bert_dropout=self.bert_dropout,
+                                                lstm_dropout=self.lstm_dropout,
                                                 lstm_hidden_size=self.lstm_hidden_size)
 
         y_preds = []

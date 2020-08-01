@@ -117,7 +117,10 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
         logger.info("Creating dataset from dataset file at %s", args.data_dir)
         examples = processor.get_examples()
         if not evaluate and args.task_type == "classify":
-            label_list = processor.get_labels()
+            if args.multi_label is not None:
+                label_list = args.multi_label
+            else:
+                label_list = processor.get_labels()
         else:
             label_list = args.label_list
 
@@ -161,7 +164,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, is_trainin
 
                 if is_training:
                     label = examples[data_index].label
-                    logger.info("label: %s (id = %d)" % (label, label_map[label]))
+                    logger.info("label: %s (id = %s)" % (label, str(f.label)))
 
         # Convert to Tensors and build dataset
         all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
@@ -215,7 +218,12 @@ def convert_example_to_features(example, max_length,
         assert len(token_type_ids) == max_length, "Error with input length {} vs {}".format(len(token_type_ids),max_length)
 
         if example.label is not None:
-            label = label_map[example.label]
+            if isinstance(example.label, list):
+                label = [-1] * len(label_map.keys())
+                for l in example.label:
+                    label[label_map[l]] = 1
+            else:
+                label = label_map[example.label]
         else:
             label = example.label
 

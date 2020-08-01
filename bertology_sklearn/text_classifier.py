@@ -21,7 +21,7 @@ from tqdm import tqdm
 from scipy.stats import pearsonr, spearmanr
 
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, multilabel_confusion_matrix
 from sklearn.model_selection import KFold
 
 from ignite.engine import Engine, Events
@@ -53,7 +53,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16_opt_level='01', patience=3, n_saved=3,
                  task_type="classify", do_cv=False, schedule_type="linear",
-                 focal_loss=False, k_fold=5):
+                 focal_loss=False, k_fold=5, multi_label=None, multi_label_threshold=0.5):
 
         super().__init__()
         self.task_type = task_type
@@ -89,6 +89,8 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         self.seed = seed
         self.schedule_type = schedule_type
         self.focal_loss = focal_loss
+        self.multi_label = multi_label
+        self.multi_label_threshold = multi_label_threshold
 
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
@@ -156,7 +158,11 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 train_processor = TextDataProcessor(X_train, y_train)
                 dev_processor = TextDataProcessor(X_dev, y_dev)
 
-                self.label_list = train_processor.get_labels()
+                if self.multi_label is None:
+                    self.label_list = train_processor.get_labels()
+                else:
+                    self.label_list = self.multi_label
+
                 self.num_labels = len(self.label_list)
                 train_ds = text_load_and_cache_examples(self, tokenizer, train_processor)
                 dev_ds = text_load_and_cache_examples(self, tokenizer, dev_processor)
@@ -169,7 +175,12 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
             processor = TextDataProcessor(X, y)
 
             dataset = text_load_and_cache_examples(self, tokenizer, processor)
-            self.label_list = processor.get_labels()
+
+            if self.multi_label is None:
+                self.label_list = processor.get_labels()
+            else:
+                self.label_list = self.multi_label
+
             self.num_labels = len(self.label_list)
             ds_len = len(dataset)
             dev_len = int(len(dataset) * self.dev_fraction)
@@ -257,20 +268,30 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 preds_np = preds.detach().cpu().numpy()
                 score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
             else:
-                if self.focal_loss:
-                    loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
-                else:
-                    loss_fct = nn.CrossEntropyLoss()
+                if self.multi_label is None:
+                    if self.focal_loss:
+                        loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
+                    else:
+                        loss_fct = nn.CrossEntropyLoss()
 
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-                preds = logits.argmax(dim=-1)
+                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                    preds = logits.argmax(dim=-1)
 
-                labels_np = labels.detach().cpu().numpy()
-                preds_np = preds.detach().cpu().numpy()
-                if self.num_labels == 2:
-                    score = f1_score(labels_np, preds_np)
+                    labels_np = labels.detach().cpu().numpy()
+                    preds_np = preds.detach().cpu().numpy()
+                    # if self.num_labels == 2:
+                    #    score = f1_score(labels_np, preds_np)
+                    # else:
+                    #    score = f1_score(labels_np, preds_np, average="macro", zero_division=1)
+                    score = f1_score(y_true=labels_np, y_pred=preds_np, average="macro")
+                    # score = (labels == preds).float().mean()
                 else:
-                    score = f1_score(labels_np, preds_np, average="macro")
+                    loss_fct = nn.MultiLabelSoftMarginLoss()
+                    loss = loss_fct(logits.float(), labels.float())
+                    y_pred = logits.sigmoid()
+                    y_pred = y_pred.detach().cpu().numpy()
+                    labels_np = labels.detach().cpu().numpy()
+                    score = ((y_pred > self.multi_label_threshold) == (labels_np > 0)).mean()
 
             if self.n_gpu > 1:
                 loss = loss.mean()
@@ -313,20 +334,30 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     preds_np = preds.detach().cpu().numpy()
                     score = (spearmanr(preds_np, labels_np)[0] + pearsonr(preds_np, labels_np)[0]) / 2
                 else:
-                    #loss_fct = nn.CrossEntropyLoss()
-                    if self.focal_loss:
-                        loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
-                    else:
-                        loss_fct = nn.CrossEntropyLoss()
-                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-                    preds = logits.argmax(dim=-1)
+                    if self.multi_label is None:
+                        if self.focal_loss:
+                            loss_fct = Focal_Loss(alpha=self.alpha, num_classes=self.num_labels)
+                        else:
+                            loss_fct = nn.CrossEntropyLoss()
 
-                    labels_np = labels.detach().cpu().numpy()
-                    preds_np = preds.detach().cpu().numpy()
-                    if self.num_labels == 2:
-                        score = f1_score(labels_np, preds_np)
+                        loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                        preds = logits.argmax(dim=-1)
+
+                        labels_np = labels.detach().cpu().numpy()
+                        preds_np = preds.detach().cpu().numpy()
+                        # if self.num_labels == 2:
+                        #    score = f1_score(labels_np, preds_np)
+                        # else:
+                        #    score = f1_score(labels_np, preds_np, average="macro", zero_division=1)
+                        score = f1_score(y_true=labels_np, y_pred=preds_np, average="macro")
+                        # score = (labels == preds).float().mean()
                     else:
-                        score = f1_score(labels_np, preds_np, average="macro")
+                        loss_fct = nn.MultiLabelSoftMarginLoss()
+                        loss = loss_fct(logits.float(), labels.float())
+                        y_pred = logits.sigmoid()
+                        y_pred = y_pred.detach().cpu().numpy()
+                        labels_np = labels.detach().cpu().numpy()
+                        score = ((y_pred > self.multi_label_threshold) == (labels_np > 0)).mean()
 
                 if self.n_gpu > 1:
                     loss = loss.mean()
@@ -347,8 +378,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
         pbar.attach(dev_evaluator, ['loss', 'score'])
 
         def score_fn(engine):
+            loss = engine.state.metrics['loss']
             score = engine.state.metrics['score']
-            return score
+            return score / (loss + 1e-12)
 
         handler = EarlyStopping(patience=self.patience, score_function=score_fn, trainer=trainer)
         dev_evaluator.add_event_handler(Events.COMPLETED, handler)
@@ -436,10 +468,21 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
             y_preds.append(y_pred)
 
         if self.task_type == "classify":
-            y_preds = torch.tensor(y_preds)
-            y_pred = torch.mode(y_preds, dim=0).values
-            y_pred = y_pred.numpy()
-            y_pred = [args.label_list[i] for i in y_pred]
+            if self.multi_label is None:
+                y_preds = torch.tensor(y_preds)
+                y_pred = torch.mode(y_preds, dim=0).values
+                y_pred = y_pred.numpy()
+                y_pred = [args.label_list[i] for i in y_pred]
+            else:
+                tmp_y_pred = np.mean(y_preds, axis=0)
+                y_pred = []
+                for tmp_y_pred_ in tmp_y_pred:
+                    y_ = []
+                    for i, pred in enumerate(tmp_y_pred_):
+                        if pred > self.multi_label_threshold:
+                            y_.append(self.label_list[i])
+                    y_pred.append(y_)
+
         else:
             y_pred = np.mean(y_preds, axis=0)
 
@@ -468,6 +511,9 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                     "token_type_ids": batch[2]
                 }
                 logits = model(**inputs)
+                if self.multi_label is not None:
+                    logits = logits.sigmoid()
+
             pred = logits.detach().cpu().numpy()
             if preds is None:
                 preds = pred
@@ -475,16 +521,34 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 preds = np.append(preds, pred, axis=0)
 
         if self.task_type == "classify":
-            preds = np.argmax(preds, axis=1)
+            output = np.argmax(preds, axis=1)
+            if self.multi_label is not None:
+                output = preds
         else:
-            preds = np.squeeze(preds)
+            output = np.squeeze(preds)
 
-        return preds
+        return output
+
+    def multi_label_to_id(self, y):
+        label_ids = []
+        for label_list in y:
+            label_id = [-1] * len(self.multi_label)
+            for label in label_list:
+                label_id[self.multi_label.index(label)] = 1
+            label_ids.append(label_id)
+        return torch.LongTensor(label_ids)
 
     def score(self, X, y, sample_weight=None):
         y_pred = self.predict(X)
         if self.task_type == "classify":
-            score = f1_score(y, y_pred, average="macro")
+            if self.multi_label is not None:
+                y_pred_ids = self.multi_label_to_id(y_pred)
+                y_true_ids = self.multi_label_to_id(y)
+                score = (y_pred_ids == y_true_ids).float().mean()
+                score = score.item()
+            else:
+                score = f1_score(y, y_pred, average="macro")
+
         else:
             score = (pearsonr(y_pred, y)[0] + spearmanr(y_pred, y)[0]) / 2
         return score

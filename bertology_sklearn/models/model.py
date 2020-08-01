@@ -81,7 +81,8 @@ class BertologyForClassification(nn.Module):
 class BertologyForTokenClassification(nn.Module):
 
     def __init__(self, model_name_or_path,
-                 num_labels, cache_dir, dropout,
+                 num_labels, cache_dir,  bert_dropout,
+                 lstm_dropout,
                  device, classifier_type="Linear",
                  num_layers=2, lstm_hidden_size=32):
 
@@ -90,30 +91,30 @@ class BertologyForTokenClassification(nn.Module):
 
         if classifier_type == "Linear":
             self.token_classifier = nn.Sequential(
-                nn.Dropout(dropout),
+                nn.Dropout(bert_dropout),
                 # nn.Softmax(),
                 nn.Linear(self.bertology_model.config.hidden_size, num_labels)
             )
         elif classifier_type == "CRF":
             self.token_classifier = nn.Sequential(
-                nn.Dropout(dropout),
+                nn.Dropout(bert_dropout),
                 nn.Linear(self.bertology_model.config.hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
         elif classifier_type == "LSTM_CRF":
             self.token_classifier = nn.Sequential(
-                nn.Dropout(dropout),
+                nn.Dropout(bert_dropout),
                 LSTM(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers,
-                     dropout=dropout),
+                     dropout=lstm_dropout),
                 nn.Linear(2*lstm_hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
 
         elif classifier_type == "GRU_CRF":
             self.token_classifier = nn.Sequential(
-                nn.Dropout(dropout),
+                nn.Dropout(bert_dropout),
                 GRU(self.bertology_model.config.hidden_size, lstm_hidden_size, num_layers=num_layers,
-                     dropout=dropout),
+                     dropout=lstm_dropout),
                 nn.Linear(2 * lstm_hidden_size, num_labels),
             )
             self.crf = CRF(num_labels, device=device)
