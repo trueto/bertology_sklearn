@@ -89,7 +89,11 @@ class DataProcessor:
             self.labels = [None] * len(self.texts_a)
 
     def get_labels(self):
-        label_list = list(np.unique(self.labels))
+        if isinstance(self.labels[0], str):
+            label_list = list(np.unique(self.labels))
+        else:
+            label_list = [label for label_n in self.labels for label in label_n]
+            label_list = list(np.unique(label_list))
         logger.info("label_list:{}".format(label_list))
         return label_list
 

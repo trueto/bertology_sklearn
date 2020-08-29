@@ -130,7 +130,8 @@ class BertologyForTokenClassification(nn.Module):
                 position_ids=None,
                 head_mask=None,
                 inputs_embeds=None,
-                labels=None
+                labels=None,
+                is_nested=False
                 ):
         bertology_output = self.bertology_model(
             input_ids,
@@ -147,19 +148,31 @@ class BertologyForTokenClassification(nn.Module):
 
         if self.classifier_type == "Linear":
             if labels is not None:
-                loss_fct = nn.CrossEntropyLoss()
+                if not is_nested:
+                    loss_fct = nn.CrossEntropyLoss()
+                else:
+                    loss_fct = nn.MultiLabelSoftMarginLoss()
                 # Only keep active parts of the loss
                 if attention_mask is not None:
                     active_loss = attention_mask.view(-1) == 1
-                    active_logits = logits.view(-1, self.num_labels)[active_loss]
-                    active_labels = labels.view(-1)[active_loss]
-                    loss = loss_fct(active_logits, active_labels)
+                    if not is_nested:
+                        active_logits = logits.view(-1, self.num_labels)[active_loss]
+                        active_labels = labels.view(-1)[active_loss]
+                        loss = loss_fct(active_logits, active_labels)
+                    else:
+                        loss = loss_fct(logits.float(), labels.float())
                 else:
-                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                    if not is_nested:
+                        loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                    else:
+                        loss = loss_fct(logits.float(), labels.float())
             else:
                 loss = torch.tensor(0, device=self.device)
 
-            sequence_tags = logits.argmax(dim=-1)
+            if not is_nested:
+                sequence_tags = logits.argmax(dim=-1)
+            else:
+                sequence_tags = logits.sigmoid()
 
         else:
             byte_tensor = torch.empty(1, dtype=torch.uint8,

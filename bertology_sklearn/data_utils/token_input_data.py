@@ -91,16 +91,30 @@ class DataProcessor:
         self.y = y
 
     def get_labels(self):
-        label_list = [label for label_l in self.labels_list for label in label_l]
+        labels = []
+        for label_list in self.labels_list:
+            for label in label_list:
+                if isinstance(label, str):
+                    labels.append(label)
+                else:
+                    labels += list(label)
         # label_list = ['<PAD>'] + list(np.unique(label_list))
-        label_list = ['<PAD>', '<START>'] + list(np.unique(label_list)) + ['<END>']
+        label_list = ['<PAD>', '<START>'] + list(np.unique(labels)) + ['<END>']
         return label_list
 
     def get_examples(self):
         examples = []
         for i, (tokens, labels) in enumerate(zip(self.words_list, self.labels_list)):
-            examples.append(InputExample(guid="tokens-{}".format(i+1),
-                                         tokens=tokens, labels=labels if self.y is not None else ["O"]*len(tokens)))
+            if isinstance(labels[0], str):
+                if self.y is None:
+                    labels = ["O"] * len(tokens)
+                in_ex = InputExample(guid="tokens-{}".format(i+1), tokens=tokens, labels=labels)
+            else:
+                if self.y is None:
+                    labels = [["O"]*len(tokens)]
+                in_ex = InputExample(guid="tokens-{}".format(i+1), tokens=tokens, labels=labels)
+
+            examples.append(in_ex)
         return examples
 
 def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
@@ -194,13 +208,23 @@ def convert_example_to_features(example, max_seq_length,label_map,
     tokens = []
     label_ids = []
     label_mask = []
+    is_nested = False if isinstance(example.labels[0], str) else True
+    zero_label_id = [0] * len(label_map.keys())
     for word, label in zip(example.tokens, example.labels):
         word_tokens = tokenizer.tokenize(word)
         if len(word_tokens) > 0:
             tokens.extend(word_tokens)
             # Use the real label id for the first token of the word, and padding ids for the remaining tokens
-            label_ids.extend([label_map[label]] + [0] * (len(word_tokens) - 1))
-            label_mask.extend([label_map[label]] + [pad_token_label_id] * (len(word_tokens) - 1))
+            if not is_nested:
+                label_ids.extend([label_map[label]] + [0] * (len(word_tokens) - 1))
+            else:
+                label_id = [0]*len(label_map.keys())
+                for label_i in label:
+                    i = label_map[label_i]
+                    label_id[i] = 1
+                label_ids.extend([label_id] + [zero_label_id] * (len(word_tokens) - 1))
+
+            label_mask.extend([1] + [pad_token_label_id] * (len(word_tokens) - 1))
 
     # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
     special_tokens_count = 3 if sep_token_extra else 2
@@ -212,25 +236,44 @@ def convert_example_to_features(example, max_seq_length,label_map,
 
     tokens += [sep_token]
     # label_ids += [0]
-    label_ids += [label_map['<END>']]
+    if not is_nested:
+        label_ids += [label_map['<END>']]
+    else:
+        label_id = [0] * len(label_map.keys())
+        label_id[label_map['<END>']] = 1
+        label_ids.append(label_id)
+
     label_mask += [pad_token_label_id]
     if sep_token_extra:
         # roberta uses an extra separator b/w pairs of sentences
         tokens += [sep_token]
-        label_ids += [0]
+        if not is_nested:
+            label_ids += [0]
+        else:
+            label_ids.append(zero_label_id)
         label_mask += [pad_token_label_id]
 
     segment_ids = [sequence_a_segment_id] * len(tokens)
 
     if cls_token_at_end:
         tokens += [cls_token]
-        label_ids += [0]
+        if not is_nested:
+            label_ids += [0]
+        else:
+            label_ids.append(zero_label_id)
+
         label_mask += [pad_token_label_id]
         segment_ids += [cls_token_segment_id]
     else:
         tokens = [cls_token] + tokens
         # label_ids = [0] + label_ids
-        label_ids = [label_map['<START>']] + label_ids
+        if not is_nested:
+            label_ids = [label_map['<START>']] + label_ids
+        else:
+            label_id = [0] * len(label_map.keys())
+            label_id[label_map["<START>"]] = 1
+            label_ids.append(label_id)
+
         label_mask = [pad_token_label_id] + label_mask
         segment_ids = [cls_token_segment_id] + segment_ids
 
@@ -246,13 +289,21 @@ def convert_example_to_features(example, max_seq_length,label_map,
         input_ids = ([pad_token] * padding_length) + input_ids
         input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
         segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
-        label_ids = ([0] * padding_length) + label_ids
+        if not is_nested:
+            label_ids = ([0] * padding_length) + label_ids
+        else:
+            label_ids = [ zero_label_id for i in range(padding_length)] + label_ids
+
         label_mask = ([pad_token_label_id] * padding_length) + label_mask
     else:
         input_ids += ([pad_token] * padding_length)
         input_mask += ([0 if mask_padding_with_zero else 1] * padding_length)
         segment_ids += ([pad_token_segment_id] * padding_length)
-        label_ids += ([0] * padding_length)
+        if not is_nested:
+            label_ids += ([0] * padding_length)
+        else:
+            label_ids += [ zero_label_id for i in range(padding_length)]
+
         label_mask += ([pad_token_label_id] * padding_length)
 
     assert len(input_ids) == max_seq_length

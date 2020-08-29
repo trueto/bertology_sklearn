@@ -14,13 +14,14 @@
 import os
 import torch
 import logging
+import shutil
 import numpy as np
 import torch.nn as nn
 from glob import glob
 from tqdm import tqdm
+from seqeval.metrics import f1_score
 
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.metrics import f1_score
 from sklearn.model_selection import KFold
 
 from ignite.engine import Engine, Events
@@ -51,7 +52,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                  kernel_sizes=(3, 4, 5), num_layers=2, weight_decay=1e-3,
                  gradient_accumulation_steps=1, max_epochs=10, learning_rate=2e-5,
                  warmup=0.1, fp16=False, fp16_opt_level='01', patience=3, n_saved=3,
-                 do_cv=False, schedule_type="linear", lstm_hidden_size=32, k_fold=5):
+                 do_cv=False, schedule_type="linear", lstm_hidden_size=32, k_fold=5,
+                 is_nested=False, multi_label_threshold=0.5):
 
         super().__init__()
         self.model_name_or_path = model_name_or_path
@@ -88,9 +90,11 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         self.seed = seed
         self.schedule_type = schedule_type
         self.lstm_hidden_size = lstm_hidden_size
+        self.is_nested = is_nested
+        self.multi_label_threshold = multi_label_threshold
 
         device = torch.device("cuda" if torch.cuda.is_available() and not self.no_cuda else "cpu")
-        self.n_gpu = torch.cuda.device_count() if not self.no_cuda else 1
+        self.n_gpu = max(torch.cuda.device_count() if not self.no_cuda else 1, 1)
 
         self.device = device
 
@@ -107,6 +111,9 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         if self.n_gpu > 0:
             torch.cuda.manual_seed_all(seed)
 
+        if "CRF" in self.classifier_type and self.is_nested:
+            raise ValueError("CRF is not supported for nested NER!")
+
     def fit(self, X, y, sample_weight=None):
 
         if not os.path.exists(self.data_dir):
@@ -116,6 +123,9 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         if not os.path.exists(self.output_dir):
             # os.mkdir(self.output_dir)
             os.makedirs(self.output_dir)
+
+        if self.overwrite_output_dir:
+            shutil.rmtree(self.output_dir)
 
         if os.path.exists(self.output_dir) and os.listdir(
                 self.output_dir) and not self.overwrite_output_dir:
@@ -193,7 +203,12 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
              'weight_decay': self.weight_decay},
             {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-
+        if 'CRF' in self.classifier_type:
+            step_lr = ['GRU', 'LSTM']
+            optimizer_grouped_parameters.append(
+                {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in step_lr)],
+                 'weight_decay': 0.0, 'lr': self.learning_rate*10}
+            )
         t_total = len(train_iter) // self.gradient_accumulation_steps * self.max_epochs
         warmup_steps = t_total * self.warmup
 
@@ -232,31 +247,29 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 "input_ids": batch[0],
                 "attention_mask": batch[1],
                 "token_type_ids": batch[2],
-                "labels": labels
+                "labels": labels,
+                "is_nested": self.is_nested
             }
 
             loss, sequence_tags = model(**inputs)
+            if not self.is_nested:
+                score = (sequence_tags == labels).float().detach().cpu().numpy()
 
-            # if self.classifier_type == "Linear" or self.n_gpu <= 1:
-            #    loss, sequence_tags = model(**inputs)
-
-            # if self.n_gpu > 1 and "CRF" in self.classifier_type:
-            #    loss, sequence_tags = model.module.forward(**inputs)
-
-            # score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
-
-            score = (sequence_tags == labels).float().detach().cpu().numpy()
-
-            # print("before: {}".format(score))
-
-            condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
-            # print(condition_1.sum())
-            condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
-            # print(condition_2.sum())
-            patten = np.logical_and(condition_1, condition_2)
-            # print(patten.sum())
-            score = score[patten].mean()
-            # print("after: {}".format(score))
+                condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+                condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+                patten = np.logical_and(condition_1, condition_2)
+                score = score[patten].mean()
+            else:
+                '''
+                y_pred = sequence_tags.detach().cpu().numpy()
+                labels_np = labels.detach().cpu().numpy()
+                score = ((y_pred > self.multi_label_threshold) == (labels_np > 0)).mean()
+                '''
+                score = ((sequence_tags > self.multi_label_threshold) == (labels > 0)).float().detach().cpu().numpy()
+                condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+                condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+                patten = np.logical_and(condition_1, condition_2)
+                score = score[patten].mean()
 
             if self.n_gpu > 1:
                 loss = loss.mean()
@@ -287,22 +300,29 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
                     "token_type_ids": batch[2],
-                    "labels": batch[3]
+                    "labels": labels,
+                    "is_nested": self.is_nested
                 }
+
                 loss, sequence_tags = model(**inputs)
-                # if self.classifier_type == "Linear" or self.n_gpu <= 1:
-                #    loss, sequence_tags = model(**inputs)
+                if not self.is_nested:
+                    score = (sequence_tags == labels).float().detach().cpu().numpy()
 
-                # if self.n_gpu > 1 and "CRF" in self.classifier_type:
-                #    loss, sequence_tags = model.module.forward(**inputs)
-
-                # score = (sequence_tags == labels).float()[labels != self.label_list.index("O")].mean()
-
-                score = (sequence_tags == labels).float().detach().cpu().numpy()
-                condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
-                condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
-                patten = np.logical_and(condition_1, condition_2)
-                score = score[patten].mean()
+                    condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+                    condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+                    patten = np.logical_and(condition_1, condition_2)
+                    score = score[patten].mean()
+                else:
+                    score = ((sequence_tags > self.multi_label_threshold) == (labels > 0)).float().detach().cpu().numpy()
+                    '''
+                    y_pred = sequence_tags.detach().cpu().numpy()
+                    labels_np = labels.detach().cpu().numpy()
+                    score = ((y_pred > self.multi_label_threshold) == (labels_np > 0)).mean()
+                    '''
+                    condition_1 = (labels != self.label_list.index("O")).detach().cpu().numpy()
+                    condition_2 = (labels != self.label_list.index("<PAD>")).detach().cpu().numpy()
+                    patten = np.logical_and(condition_1, condition_2)
+                    score = score[patten].mean()
 
                 if self.n_gpu > 1:
                     loss = loss.mean()
@@ -373,13 +393,13 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         # save config
         @trainer.on(Events.COMPLETED)
         def save_config(engine):
-            torch.save(self, os.path.join(self.output_dir, 'fit_args.pt'))
+            torch.save(self, os.path.join(self.output_dir, 'fit_args.pkl'))
 
         trainer.run(train_iter, max_epochs=self.max_epochs)
 
     def predict(self, X):
 
-        args = torch.load(os.path.join(self.output_dir, 'fit_args.pt'))
+        args = torch.load(os.path.join(self.output_dir, 'fit_args.pkl'))
 
 
         ## tokenizer
@@ -409,14 +429,26 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                                                 lstm_hidden_size=self.lstm_hidden_size)
 
         y_preds = []
-        for model_state_path in glob(os.path.join(self.output_dir, '*.pth')):
+        for model_state_path in glob(os.path.join(self.output_dir, '*.pt*')):
             model.load_state_dict(torch.load(model_state_path))
             y_pred,  out_label_ids = self.single_predict(model, dataloader)
             y_preds.append(y_pred)
 
-        y_preds = torch.tensor(y_preds)
-        y_pred = torch.mode(y_preds, dim=0).values
-        y_pred = y_pred.numpy()
+        if not self.is_nested:
+            y_preds = torch.tensor(y_preds)
+            y_pred = torch.mode(y_preds, dim=0).values
+            y_pred = y_pred.numpy()
+        else:
+            tmp_y_pred = np.mean(y_preds, axis=0)
+            y_pred = [[]] * tmp_y_pred.shape[0]
+
+            for i, seq in enumerate(tmp_y_pred):
+                for j, label_logits in enumerate(seq):
+                    y_ = []
+                    for k, pred in enumerate(label_logits):
+                        if pred > self.multi_label_threshold:
+                            y_.append(args.label_list[k])
+                    y_pred[i].append(y_)
 
         preds_list = [[] for _ in range(out_label_ids.shape[0])]
 
@@ -425,7 +457,10 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
         for i in range(out_label_ids.shape[0]):
             for j in range(out_label_ids.shape[1]):
                 if out_label_ids[i, j] != pad_token_label_id:
-                    preds_list[i].append(args.label_list[y_pred[i][j]])
+                    if not self.is_nested:
+                        preds_list[i].append(args.label_list[y_pred[i][j]])
+                    else:
+                        preds_list[i].append(y_pred[i][j])
         return preds_list
 
     def single_predict(self, model, data_iter):
@@ -449,7 +484,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 inputs = {
                     "input_ids": batch[0],
                     "attention_mask": batch[1],
-                    "token_type_ids": batch[2]
+                    "token_type_ids": batch[2],
+                    "is_nested": self.is_nested
                 }
                 _, sequence_tags = model(**inputs)
                 # if self.classifier_type == "Linear" or self.n_gpu <= 1:
@@ -469,7 +505,24 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
         return preds, out_label_ids
 
+    def multi_label_to_id(self, y):
+        args = torch.load(os.path.join(self.output_dir, 'fit_args.pkl'))
+        label_ids = [ [] ]* len(y)
+        for i, seq in enumerate(y):
+            for j, label_list in enumerate(seq):
+                label_id = [-1] * len(args.label_list)
+                for label in label_list:
+                    label_id[args.label_list.index(label)] = 1
+                label_ids[i].append(label_id)
+        return torch.LongTensor(label_ids)
+
     def score(self, X, y, sample_weight=None):
         y_pred = self.predict(X)
-        score = f1_score(y, y_pred, average="macro")
+        if not self.is_nested:
+            score = f1_score(y, y_pred, average="macro")
+        else:
+            y_pred_ids = self.multi_label_to_id(y_pred)
+            y_true_ids = self.multi_label_to_id(y)
+            score = (y_pred_ids == y_true_ids).float().mean()
+            score = score.item()
         return score
