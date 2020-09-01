@@ -155,8 +155,8 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
 
                 self.overwrite_cache = True
 
-                train_processor = TokenDataProcessor(X_train, y_train)
-                dev_processor = TokenDataProcessor(X_dev, y_dev)
+                train_processor = TokenDataProcessor(X_train, y_train, is_nested=self.is_nested)
+                dev_processor = TokenDataProcessor(X_dev, y_dev, is_nested=self.is_nested)
 
                 self.label_list = train_processor.get_labels()
                 self.num_labels = len(self.label_list)
@@ -166,7 +166,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
                 self.single_fit(train_ds, dev_ds, cv=cv)
         else:
             ## data
-            processor = TokenDataProcessor(X, y)
+            processor = TokenDataProcessor(X, y, is_nested=self.is_nested)
             dataset = token_load_and_cache_examples(self, tokenizer, processor)
 
             self.label_list = processor.get_labels()
@@ -439,7 +439,7 @@ class BertologyTokenClassifier(BaseEstimator, ClassifierMixin):
             y_pred = torch.mode(y_preds, dim=0).values
             y_pred = y_pred.numpy()
         else:
-            tmp_y_pred = np.mean(y_preds, axis=0)
+            tmp_y_pred = np.max(y_preds, axis=0)
             y_pred = [[]] * tmp_y_pred.shape[0]
 
             for i, seq in enumerate(tmp_y_pred):

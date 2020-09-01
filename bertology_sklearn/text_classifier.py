@@ -347,7 +347,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                         score = f1_score(y_true=labels_np, y_pred=preds_np, average="macro")
                         # score = (labels == preds).float().mean()
                     else:
-                        loss_fct = nn.MultiLabelSoftMarginLoss()
+                        loss_fct = nn.BCEWithLogitsLoss()
                         loss = loss_fct(logits.float(), labels.float())
                         y_pred = logits.sigmoid()
                         y_pred = y_pred.detach().cpu().numpy()
@@ -469,7 +469,7 @@ class BertologyClassifier(BaseEstimator, ClassifierMixin):
                 y_pred = y_pred.numpy()
                 y_pred = [args.label_list[i] for i in y_pred]
             else:
-                tmp_y_pred = np.mean(y_preds, axis=0)
+                tmp_y_pred = np.max(y_preds, axis=0)
                 y_pred = []
                 for tmp_y_pred_ in tmp_y_pred:
                     y_ = []

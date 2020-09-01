@@ -151,7 +151,7 @@ class BertologyForTokenClassification(nn.Module):
                 if not is_nested:
                     loss_fct = nn.CrossEntropyLoss()
                 else:
-                    loss_fct = nn.MultiLabelSoftMarginLoss()
+                    loss_fct = nn.BCEWithLogitsLoss()
                 # Only keep active parts of the loss
                 if attention_mask is not None:
                     active_loss = attention_mask.view(-1) == 1

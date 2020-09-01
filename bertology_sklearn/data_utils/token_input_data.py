@@ -80,8 +80,9 @@ class InputFeatures(object):
 
 class DataProcessor:
 
-    def __init__(self, X, y=None):
+    def __init__(self, X, y=None, is_nested=False):
         self.words_list = to_numpy(X)
+        self.is_nested = is_nested
 
         if y is not None:
             self.labels_list = to_numpy(y)
@@ -94,7 +95,7 @@ class DataProcessor:
         labels = []
         for label_list in self.labels_list:
             for label in label_list:
-                if isinstance(label, str):
+                if not self.is_nested:
                     labels.append(label)
                 else:
                     labels += list(label)
@@ -105,7 +106,7 @@ class DataProcessor:
     def get_examples(self):
         examples = []
         for i, (tokens, labels) in enumerate(zip(self.words_list, self.labels_list)):
-            if isinstance(labels[0], str):
+            if not self.is_nested:
                 if self.y is None:
                     labels = ["O"] * len(tokens)
                 in_ex = InputExample(guid="tokens-{}".format(i+1), tokens=tokens, labels=labels)
@@ -143,7 +144,8 @@ def load_and_cache_examples(args, tokenizer, processor, evaluate=False):
             examples=examples,
             tokenizer=tokenizer,
             max_seq_length=args.max_seq_length,
-            label_list=label_list
+            label_list=label_list,
+            is_nested=args.is_nested
         )
         if not evaluate:
             torch.save(dataset, cached_features_file)
@@ -154,13 +156,14 @@ def pool_init_fn(tokenizer_for_convert):
     global tokenizer
     tokenizer = tokenizer_for_convert
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length, label_list):
+def convert_examples_to_features(examples, tokenizer, max_seq_length, label_list, is_nested):
     label_map = {label:i for i, label in enumerate(label_list)}
     with Pool(1, initializer=pool_init_fn, initargs=(tokenizer, )) as p:
         part_fn = partial(
             convert_example_to_features,
             max_seq_length=max_seq_length,
-            label_map=label_map
+            label_map=label_map,
+            is_nested=is_nested
         )
 
         features = list(
@@ -204,11 +207,12 @@ def convert_example_to_features(example, max_seq_length,label_map,
                                 pad_token_segment_id=0,
                                 pad_token_label_id=-100,
                                 sequence_a_segment_id=0,
-                                mask_padding_with_zero=True):
+                                mask_padding_with_zero=True,
+                                is_nested=False):
     tokens = []
     label_ids = []
     label_mask = []
-    is_nested = False if isinstance(example.labels[0], str) else True
+
     zero_label_id = [0] * len(label_map.keys())
     for word, label in zip(example.tokens, example.labels):
         word_tokens = tokenizer.tokenize(word)
